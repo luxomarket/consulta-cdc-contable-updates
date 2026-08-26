@@ -17,94 +17,53 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install browser tooling
-        run: |
-          python -m pip install --upgrade pip
-          pip install playwright
-          python -m playwright install --with-deps chromium
-      - name: Probe public CDC form with published example
+      - name: Install requests
+        run: pip install requests
+      - name: Probe direct public API with browser-compatible headers
         run: |
           cat > /tmp/probe.py <<'PY'
-          from playwright.sync_api import sync_playwright
-          import json, time, re
+          import requests, json, time
 
-          URL = 'https://cdc.siscotic.com.py/'
-          # CDC published publicly in FacturaSend documentation.
-          CDC = '01800695631001001000000612021112917595714694'
+          BASE = 'https://cdc.siscotic.com.py/'
+          API = 'https://cdc.siscotic.com.py/api/consultar'
+          CDCS = [
+              # Ejemplos publicados por terceros en documentación pública.
+              '01800695631001001000000612021112917595714694',
+              '01800695631001002100732012024072311932227581',
+              '01800268520001001000000422024082310845861483',
+          ]
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
+              'Accept': 'application/json, text/plain, */*',
+              'Accept-Language': 'es-PY,es;q=0.9,en;q=0.8',
+              'Referer': BASE,
+              'Cache-Control': 'no-cache',
+              'Pragma': 'no-cache',
+          }
 
-          with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True)
-              page = browser.new_page(locale='es-PY', viewport={'width': 1280, 'height': 900})
-              page.set_default_timeout(12000)
-              page.set_default_navigation_timeout(12000)
-              captures = []
+          s = requests.Session()
+          s.headers.update(headers)
+          t0 = time.monotonic()
+          r0 = s.get(BASE, timeout=10)
+          print('HOME', r0.status_code, r0.url, 'cookies', dict(s.cookies))
+          rt = s.get(BASE + 'api/test', timeout=10)
+          print('TEST', rt.status_code, rt.text[:500])
 
-              def on_response(resp):
-                  try:
-                      if resp.request.resource_type not in {'xhr','fetch','document'}:
-                          return
-                      ct = (resp.headers.get('content-type') or '').lower()
-                      item = {'url': resp.url, 'status': resp.status, 'type': resp.request.resource_type, 'content_type': ct}
-                      if resp.request.resource_type in {'xhr','fetch'}:
-                          try:
-                              txt = resp.text()
-                              item['body_head'] = txt[:1200]
-                          except Exception as exc:
-                              item['body_error'] = str(exc)
-                      captures.append(item)
-                      print('RESPONSE', json.dumps(item, ensure_ascii=False))
-                  except Exception as exc:
-                      print('RESPONSE_HANDLER_ERROR', repr(exc))
-
-              page.on('response', on_response)
-              print('NAVIGATE', URL)
-              r = page.goto(URL, wait_until='domcontentloaded')
-              print('PAGE_STATUS', r.status if r else None)
-              print('TITLE', page.title())
-              print('URL_FINAL', page.url)
-
-              # Close the optional contact modal through its normal UI.
+          for cdc in CDCS:
+              start = time.monotonic()
+              r = s.get(API, params={'cdc': cdc}, timeout=10)
+              elapsed = time.monotonic() - start
+              print('CDC', cdc, 'STATUS', r.status_code, 'ELAPSED', round(elapsed, 3), 'CTYPE', r.headers.get('content-type'))
+              print('BODY', r.text[:4000])
               try:
-                  btn = page.get_by_role('button', name=re.compile(r'Ahora no', re.I))
-                  if btn.count() and btn.first.is_visible():
-                      btn.first.click(timeout=1500)
-                      print('MODAL_CLOSED')
+                  payload = r.json()
+                  if isinstance(payload, dict):
+                      print('JSON_KEYS', sorted(payload.keys()))
+                      data = payload.get('data')
+                      if isinstance(data, dict):
+                          print('DATA_KEYS', sorted(data.keys()))
               except Exception as exc:
-                  print('MODAL_CLOSE_WARN', repr(exc))
-
-              inputs = page.locator('input[placeholder*="CDC" i], input[maxlength="44"], input[name*="cdc" i]')
-              print('INPUT_COUNT', inputs.count())
-              if inputs.count() == 0:
-                  print('BODY', page.locator('body').inner_text()[:5000])
-                  raise SystemExit('NO_CDC_INPUT')
-              field = inputs.first
-              field.fill(CDC)
-              print('INPUT_VALUE', field.input_value())
-
-              buttons = page.get_by_role('button', name=re.compile(r'^\s*Consultar\s*$', re.I))
-              print('BUTTON_COUNT', buttons.count())
-              if buttons.count():
-                  buttons.first.click()
-              else:
-                  field.press('Enter')
-
-              started = time.monotonic()
-              last_body = ''
-              while time.monotonic() - started < 12:
-                  page.wait_for_timeout(200)
-                  body = page.locator('body').inner_text()
-                  last_body = body
-                  low = body.lower()
-                  if CDC in body or any(x in low for x in ['razon social', 'razón social']):
-                      # Check whether result placeholders have been replaced.
-                      if 'tipo de documento\n-' not in low and 'total general\n-' not in low:
-                          break
-              elapsed = time.monotonic() - started
-              print('ELAPSED_SECONDS', round(elapsed, 3))
-              print('BODY_AFTER_START')
-              print(last_body[:10000])
-              print('BODY_AFTER_END')
-              print('CAPTURE_COUNT', len(captures))
-              browser.close()
+                  print('JSON_ERROR', repr(exc))
+          print('TOTAL', round(time.monotonic()-t0, 3))
           PY
           python /tmp/probe.py
