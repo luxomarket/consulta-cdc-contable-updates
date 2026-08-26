@@ -19,15 +19,18 @@ jobs:
           python-version: '3.12'
       - name: Install exact v1.5.5 HTTP stack
         run: pip install 'requests>=2.32,<3'
-      - name: Validate v1.5.5 requests contract against real public DTE
+      - name: Validate invoice and NCE with v1.5.5 requests contract
         run: |
           cat > /tmp/probe_v155.py <<'PY'
           import time
           import requests
 
-          CDC = '01800268520001001000000422024082310845861483'
           HOME = 'https://cdc.siscotic.com.py/'
           API = 'https://cdc.siscotic.com.py/api/consultar'
+          CASES = [
+              ('FACTURA', '01800268520001001000000422024082310845861483', None),
+              ('NCE', '05800018125001004001467712025050917914375148', 'crédito'),
+          ]
           headers = {
               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
               'Accept': 'application/json, text/plain, */*',
@@ -36,33 +39,36 @@ jobs:
               'Cache-Control': 'no-cache',
               'Pragma': 'no-cache',
           }
-          session = requests.Session()
-          session.headers.update(headers)
-          start = time.monotonic()
-          r = session.get(API, params={'cdc': CDC}, timeout=10, allow_redirects=True)
-          elapsed = time.monotonic() - start
-          print('HTTP_STATUS', r.status_code)
-          print('ELAPSED_SECONDS', round(elapsed, 3))
-          print('CONTENT_TYPE', r.headers.get('content-type'))
-          payload = r.json()
-          print('PAYLOAD_KEYS', sorted(payload.keys()))
-          assert r.status_code == 200, r.text[:1000]
-          assert payload.get('success') is True, payload
-          assert payload.get('cdc') == CDC, payload.get('cdc')
-          data = payload.get('data')
-          assert isinstance(data, dict) and data, 'data vacío'
-          for key in ('informacion_general','emisor','receptor','timbrado','items','liquidaciones_iva'):
-              assert key in data, f'falta {key}'
-          emisor = data['emisor']; timbrado = data['timbrado']; liq = data['liquidaciones_iva']
-          assert emisor.get('ruc'), 'sin RUC emisor'
-          assert emisor.get('razon_social'), 'sin razón social emisor'
-          assert timbrado.get('establecimiento') and timbrado.get('punto_emision') and timbrado.get('numero_documento'), 'sin comprobante'
-          assert isinstance(data.get('items'), list) and len(data['items']) >= 1, 'sin items'
-          assert liq.get('total_general') is not None, 'sin total general'
-          print('VALIDATED_EMISOR', emisor.get('ruc'), emisor.get('razon_social'))
-          print('VALIDATED_COMPROBANTE', timbrado.get('establecimiento'), timbrado.get('punto_emision'), timbrado.get('numero_documento'))
-          print('VALIDATED_ITEMS', len(data['items']))
-          print('VALIDATED_TOTAL', liq.get('total_general'))
-          print('LIVE_V155_OK')
+          session = requests.Session(); session.headers.update(headers)
+          successes = 0
+          for label, cdc, expected_type in CASES:
+              start = time.monotonic()
+              r = session.get(API, params={'cdc': cdc}, timeout=15, allow_redirects=True)
+              elapsed = time.monotonic() - start
+              print(label, 'HTTP_STATUS', r.status_code, 'ELAPSED_SECONDS', round(elapsed, 3))
+              payload = r.json()
+              print(label, 'SUCCESS_FIELD', payload.get('success'), 'ORIGIN', payload.get('origen'), 'ERROR', payload.get('error'))
+              if r.status_code != 200 or payload.get('success') is not True:
+                  print(label, 'BODY_HEAD', r.text[:1000])
+                  continue
+              assert payload.get('cdc') == cdc
+              data = payload.get('data'); assert isinstance(data, dict) and data
+              for key in ('informacion_general','emisor','receptor','timbrado','items','liquidaciones_iva'):
+                  assert key in data, f'{label}: falta {key}'
+              emisor=data['emisor']; timbrado=data['timbrado']; liq=data['liquidaciones_iva']
+              assert emisor.get('ruc') and emisor.get('razon_social')
+              assert timbrado.get('establecimiento') and timbrado.get('punto_emision') and timbrado.get('numero_documento')
+              assert isinstance(data.get('items'), list) and data['items']
+              assert liq.get('total_general') is not None
+              tipo = str(timbrado.get('tipo_documento') or '')
+              if expected_type:
+                  assert expected_type.lower() in tipo.lower(), (label, tipo)
+              print(label, 'TYPE', tipo, 'COMPROBANTE', timbrado.get('establecimiento'), timbrado.get('punto_emision'), timbrado.get('numero_documento'), 'ITEMS', len(data['items']), 'TOTAL', liq.get('total_general'))
+              if label == 'NCE':
+                  assoc = data.get('documentos_asociados') or data.get('documento_asociado') or data.get('documentos_asociados_electronicos')
+                  print('NCE_ASSOCIATED_PRESENT', bool(assoc), 'ASSOCIATED_TYPE', type(assoc).__name__ if assoc is not None else None)
+              successes += 1
+          assert successes == len(CASES), f'solo {successes}/{len(CASES)} casos encontrados'
+          print('LIVE_V155_INVOICE_NCE_OK')
           PY
           python /tmp/probe_v155.py
