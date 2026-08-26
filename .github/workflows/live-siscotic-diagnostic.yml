@@ -18,34 +18,28 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install exact v1.5.5 HTTP stack
-        run: pip install 'httpx>=0.27,<1' 'truststore>=0.9,<1'
-      - name: Validate v1.5.5 direct contract against real public DTE
+        run: pip install 'requests>=2.32,<3'
+      - name: Validate v1.5.5 requests contract against real public DTE
         run: |
           cat > /tmp/probe_v155.py <<'PY'
-          import ssl, time, json
-          import httpx, truststore
+          import time
+          import requests
 
           CDC = '01800268520001001000000422024082310845861483'
           HOME = 'https://cdc.siscotic.com.py/'
           API = 'https://cdc.siscotic.com.py/api/consultar'
-          UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36'
           headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
               'Accept': 'application/json, text/plain, */*',
               'Accept-Language': 'es-PY,es;q=0.9,en;q=0.8',
               'Referer': HOME,
-              'User-Agent': UA,
               'Cache-Control': 'no-cache',
               'Pragma': 'no-cache',
-              'Sec-Fetch-Dest': 'empty',
-              'Sec-Fetch-Mode': 'cors',
-              'Sec-Fetch-Site': 'same-origin',
           }
-          ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-          ctx.check_hostname = True
-          ctx.verify_mode = ssl.CERT_REQUIRED
+          session = requests.Session()
+          session.headers.update(headers)
           start = time.monotonic()
-          with httpx.Client(timeout=10.0, follow_redirects=True, verify=ctx, trust_env=True, headers=headers) as client:
-              r = client.get(API, params={'cdc': CDC})
+          r = session.get(API, params={'cdc': CDC}, timeout=10, allow_redirects=True)
           elapsed = time.monotonic() - start
           print('HTTP_STATUS', r.status_code)
           print('ELAPSED_SECONDS', round(elapsed, 3))
@@ -59,9 +53,7 @@ jobs:
           assert isinstance(data, dict) and data, 'data vacío'
           for key in ('informacion_general','emisor','receptor','timbrado','items','liquidaciones_iva'):
               assert key in data, f'falta {key}'
-          emisor = data['emisor']
-          timbrado = data['timbrado']
-          liq = data['liquidaciones_iva']
+          emisor = data['emisor']; timbrado = data['timbrado']; liq = data['liquidaciones_iva']
           assert emisor.get('ruc'), 'sin RUC emisor'
           assert emisor.get('razon_social'), 'sin razón social emisor'
           assert timbrado.get('establecimiento') and timbrado.get('punto_emision') and timbrado.get('numero_documento'), 'sin comprobante'
