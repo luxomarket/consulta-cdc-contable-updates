@@ -9,7 +9,11 @@ permissions:
   contents: read
 
 jobs:
-  matrix-windows:
+  fresh-linked-installer-browser:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -17,112 +21,114 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install stack
-        run: pip install 'requests>=2.32,<3' 'playwright>=1.50,<2'
-      - name: Validate diverse CDC matrix and native Edge fallback
+      - name: Install browser stack
+        run: pip install 'playwright>=1.50,<2'
+      - name: Validate v1.5.7 fresh profile and restart
         shell: pwsh
         run: |
           @'
-          import json, os, re, socket, subprocess, tempfile, threading, time, urllib.request
+          import json, os, re, socket, subprocess, time, urllib.request
           from pathlib import Path
-          import requests
+          from playwright.sync_api import sync_playwright
 
           HOME='https://cdc.siscotic.com.py/'
-          API=HOME+'api/consultar'
-          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36'
-          HEADERS={'User-Agent':UA,'Accept':'application/json, text/plain, */*','Accept-Language':'es-PY,es;q=0.9,en;q=0.8','Referer':HOME,'Cache-Control':'no-cache','Pragma':'no-cache'}
           CASES=[
-            ('USER_PUNTOFARMA','01800228774735001003321522026080112808168839','Factura'),
-            ('FACTURA_CANCELADA','01800268520001001000000422024082310845861483','Factura'),
-            ('NCE','05800018125001004001467712025050917914375148','crédito'),
-            ('NDE_DNIT','01444444017001001001452822501201715873226094','débito'),
+            ('USER_FAILING','01800228774735001003321522026080112808168839'),
+            ('NCE','05800018125001004001467712025050917914375148'),
+            ('BIGGIE','01800774060069002030118622026080214930621220'),
           ]
+          PROFILE=Path(os.environ['RUNNER_TEMP'])/'cdc-v157-profile'
+          PROFILE.mkdir(parents=True,exist_ok=True)
 
-          def validate(label,cdc,status,text,elapsed,expected):
-            try: p=json.loads(text)
-            except Exception: p={}
-            ok=status==200 and p.get('success') is True and p.get('cdc')==cdc and isinstance(p.get('data'),dict)
-            row={'label':label,'status':status,'elapsed':round(elapsed,3),'ok':ok,'error':p.get('error') if isinstance(p,dict) else None}
-            if ok:
-              d=p['data']; t=d.get('timbrado') or {}; e=d.get('emisor') or {}; liq=d.get('liquidaciones_iva') or {}; items=d.get('items') or []
-              row.update({'tipo':t.get('tipo_documento'),'emisor':e.get('razon_social'),'numero':f"{t.get('establecimiento','')}-{t.get('punto_emision','')}-{t.get('numero_documento','')}",'items':len(items),'total':liq.get('total_general'),'estado':(d.get('informacion_general') or {}).get('estado')})
-              essential=bool(e.get('ruc') and e.get('razon_social') and t.get('establecimiento') and t.get('punto_emision') and t.get('numero_documento') and items and liq.get('total_general') is not None)
-              ok=ok and essential and (expected.lower() in str(t.get('tipo_documento') or '').lower())
-              row['ok']=ok
-            print('ROW',json.dumps(row,ensure_ascii=False))
-            return ok,row
+          def find_edge():
+            candidates=[Path(os.environ.get('PROGRAMFILES(X86)',''))/'Microsoft'/'Edge'/'Application'/'msedge.exe',Path(os.environ.get('PROGRAMFILES',''))/'Microsoft'/'Edge'/'Application'/'msedge.exe']
+            return next((p for p in candidates if p.is_file()),None)
 
-          # 1) Direct Windows session: all cases twice to detect intermittent blocks/state.
-          s=requests.Session(); s.headers.update(HEADERS)
-          direct=[]
-          for round_no in (1,2):
-            for label,cdc,expected in CASES:
-              t=time.monotonic()
+          def free_port():
+            with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as s:
+              s.bind(('127.0.0.1',0)); return s.getsockname()[1]
+
+          def cleanup_locks():
+            for name in ('SingletonLock','SingletonCookie','SingletonSocket'):
+              try: (PROFILE/name).unlink(missing_ok=True)
+              except Exception: pass
+
+          def wait_form(page, timeout=30):
+            deadline=time.monotonic()+timeout; reloaded=False; last=''
+            while time.monotonic()<deadline:
+              loc=page.locator('#searchInput')
+              if loc.count() and loc.first.is_visible(): return loc.first
+              try: last=page.locator('body').inner_text(timeout=1000)
+              except Exception: last=''
+              low=' '.join(last.lower().split())
+              if ('recaptcha' in low or 'no soy un robot' in low or ('captcha' in low and 'imunify' not in low)):
+                raise RuntimeError('interactive captcha: '+last[:300])
+              page.wait_for_timeout(250)
+              if not reloaded and time.monotonic()>deadline-20:
+                try: page.reload(wait_until='domcontentloaded',timeout=30000); reloaded=True
+                except Exception: pass
+            raise RuntimeError('form not ready: '+last[:600])
+
+          def launch():
+            cleanup_locks(); exe=find_edge(); assert exe
+            port=free_port()
+            args=[str(exe),f'--remote-debugging-port={port}',f'--user-data-dir={PROFILE}','--no-first-run','--no-default-browser-check','--start-minimized','about:blank']
+            si=subprocess.STARTUPINFO(); si.dwFlags|=subprocess.STARTF_USESHOWWINDOW; si.wShowWindow=6
+            proc=subprocess.Popen(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL,creationflags=getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0),startupinfo=si)
+            ep=f'http://127.0.0.1:{port}/json/version'; deadline=time.monotonic()+12
+            while time.monotonic()<deadline:
               try:
-                r=s.get(API,params={'cdc':cdc},timeout=22,allow_redirects=True)
-                ok,row=validate(f'{label}_R{round_no}',cdc,r.status_code,r.text,time.monotonic()-t,expected)
-              except Exception as exc:
-                ok=False; row={'label':f'{label}_R{round_no}','ok':False,'exception':repr(exc)}; print('ROW',json.dumps(row,ensure_ascii=False))
-              direct.append(ok)
-              time.sleep(.2)
+                with urllib.request.urlopen(ep,timeout=.5) as rr:
+                  if json.loads(rr.read().decode()).get('webSocketDebuggerUrl'): break
+              except Exception: time.sleep(.1)
+            else: raise RuntimeError('CDP timeout')
+            pw=sync_playwright().start(); browser=pw.chromium.connect_over_cdp(f'http://127.0.0.1:{port}',timeout=20000)
+            ctx=browser.contexts[0]; page=ctx.pages[0]; page.set_default_timeout(30000); page.set_default_navigation_timeout(30000)
+            return proc,pw,browser,ctx,page
 
-          # 2) Native Edge/CDP exact production-style fallback for the user's CDC and NCE.
-          edge_result={'ok':False,'rows':[],'error':None}
-          def edge_worker():
-            proc=pw=browser=None
-            profile=Path(tempfile.mkdtemp(prefix='cdc-prod-edge-'))
+          def close_all(proc,pw,browser):
+            try: browser.close()
+            except Exception: pass
+            try: pw.stop()
+            except Exception: pass
             try:
-              candidates=[Path(os.environ.get('PROGRAMFILES(X86)',''))/'Microsoft'/'Edge'/'Application'/'msedge.exe',Path(os.environ.get('PROGRAMFILES',''))/'Microsoft'/'Edge'/'Application'/'msedge.exe']
-              exe=next((p for p in candidates if p.is_file()),None); assert exe, 'Edge not found'
-              with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as sock: sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
-              args=[str(exe),f'--remote-debugging-port={port}',f'--user-data-dir={profile}','--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-component-update','--disable-features=Translate,MediaRouter','--window-position=-32000,-32000','--window-size=1200,900','--start-minimized','about:blank']
-              si=subprocess.STARTUPINFO(); si.dwFlags |= subprocess.STARTF_USESHOWWINDOW; si.wShowWindow=6
-              proc=subprocess.Popen(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL,creationflags=getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0),startupinfo=si)
-              ep=f'http://127.0.0.1:{port}/json/version'; deadline=time.monotonic()+10
-              while time.monotonic()<deadline:
-                try:
-                  with urllib.request.urlopen(ep,timeout=.35) as rr:
-                    if json.loads(rr.read().decode()).get('webSocketDebuggerUrl'): break
-                except Exception: time.sleep(.08)
-              else: raise RuntimeError('CDP timeout')
-              from playwright.sync_api import sync_playwright
-              pw=sync_playwright().start(); browser=pw.chromium.connect_over_cdp(f'http://127.0.0.1:{port}',timeout=22000)
-              context=browser.contexts[0]; page=context.pages[0]; page.set_default_timeout(22000); page.set_default_navigation_timeout(22000)
-              page.goto(HOME,wait_until='domcontentloaded',timeout=22000)
-              try:
-                b=page.get_by_role('button',name=re.compile(r'Ahora no',re.I));
-                if b.count() and b.first.is_visible(): b.first.click(timeout=700)
-              except Exception: pass
-              edge_ok=[]
-              for label,cdc,expected in (CASES[0],CASES[2]):
-                page.locator('#searchInput').fill(cdc); t=time.monotonic()
-                with page.expect_response(lambda resp:'/api/consultar' in resp.url,timeout=22000) as info:
-                  page.get_by_role('button',name=re.compile(r'^\s*Consultar\s*$',re.I)).first.click()
-                resp=info.value; ok,row=validate('EDGE_'+label,cdc,resp.status,resp.text(),time.monotonic()-t,expected)
-                edge_result['rows'].append(row); edge_ok.append(ok)
-              edge_result['ok']=all(edge_ok)
-            except Exception as exc: edge_result['error']=repr(exc)
-            finally:
-              try:
-                if browser: browser.close()
-              except Exception: pass
-              try:
-                if pw: pw.stop()
-              except Exception: pass
-              try:
-                if proc and proc.poll() is None: proc.terminate()
-              except Exception: pass
-          th=threading.Thread(target=edge_worker,daemon=True); th.start(); th.join(120)
-          print('EDGE_FINAL',json.dumps(edge_result,ensure_ascii=False))
-          assert not th.is_alive(), 'Edge fallback hung'
-          # NDE from an old public DNIT manual can legitimately no longer be retained by the third-party source.
-          # Require all modern real cases in both rounds; record NDE separately as compatibility evidence.
-          modern_indices=[0,1,2,4,5,6]
-          modern_ok=all(direct[i] for i in modern_indices)
-          print('DIRECT_RESULTS',direct)
-          print('MODERN_CASES_OK',modern_ok,'EDGE_OK',edge_result['ok'])
-          assert modern_ok, 'One or more modern real CDCs failed direct repeated validation'
-          assert edge_result['ok'], edge_result
-          print('LIVE_V156_FULL_MATRIX_OK')
-          '@ | Set-Content -Path $env:RUNNER_TEMP\probe.py -Encoding utf8
-          python $env:RUNNER_TEMP\probe.py
+              if proc.poll() is None:
+                subprocess.run(['taskkill','/PID',str(proc.pid),'/T','/F'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=8)
+            except Exception: pass
+            time.sleep(.5)
+
+          def query(page,label,cdc):
+            if page.url=='about:blank' or 'cdc.siscotic.com.py' not in page.url:
+              page.goto(HOME,wait_until='domcontentloaded',timeout=30000)
+            field=wait_form(page)
+            try:
+              b=page.get_by_role('button',name=re.compile(r'Ahora no',re.I))
+              if b.count() and b.first.is_visible(): b.first.click(timeout=800)
+            except Exception: pass
+            field.fill(cdc); started=time.monotonic()
+            with page.expect_response(lambda r:'/api/consultar' in r.url,timeout=30000) as info:
+              page.get_by_role('button',name=re.compile(r'^\s*Consultar\s*$',re.I)).first.click()
+            resp=info.value; payload=json.loads(resp.text()); elapsed=round(time.monotonic()-started,3)
+            d=payload.get('data') or {}
+            row={'label':label,'status':resp.status,'elapsed':elapsed,'success':payload.get('success'),'emisor':d.get('emisor',{}).get('razon_social'),'doc':d.get('timbrado',{}).get('numero_documento'),'total':d.get('liquidaciones_iva',{}).get('total_general')}
+            print('ROW',json.dumps(row,ensure_ascii=False))
+            assert resp.status==200 and payload.get('success') is True and row['emisor'] and row['doc'] and row['total'] is not None,row
+            return row
+
+          proc=pw=browser=None
+          try:
+            proc,pw,browser,ctx,page=launch(); page.goto(HOME,wait_until='domcontentloaded',timeout=30000); wait_form(page)
+            query(page,*CASES[0]); query(page,*CASES[1])
+            print('COOKIES_AFTER_FIRST',len(ctx.cookies()))
+          finally:
+            if proc: close_all(proc,pw,browser)
+
+          proc=pw=browser=None
+          try:
+            proc,pw,browser,ctx,page=launch(); page.goto(HOME,wait_until='domcontentloaded',timeout=30000); wait_form(page)
+            query(page,*CASES[2])
+            print('V157_FRESH_AND_RESTART_OK')
+          finally:
+            if proc: close_all(proc,pw,browser)
+          '@ | Set-Content -Path $env:RUNNER_TEMP\probe_v157.py -Encoding utf8
+          python $env:RUNNER_TEMP\probe_v157.py
