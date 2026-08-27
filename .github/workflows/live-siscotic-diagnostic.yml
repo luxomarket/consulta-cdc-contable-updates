@@ -19,31 +19,45 @@ jobs:
           python-version: '3.12'
       - name: Install stack
         run: pip install 'requests>=2.32,<3' 'lxml>=5,<7'
-      - name: Fetch and parse official DNIT exchange rates
+      - name: Discover and parse official DNIT exchange rates
         shell: pwsh
         run: |
           @'
-          import re, json
-          from datetime import date
+          import re
+          from urllib.parse import urljoin
           import requests
           from lxml import html
 
-          URL='https://www.dnit.gov.py/web/portal-institucional/search?delta=60&q=Tipos%20de%20cambios%20del%20mes%20de%20Agosto%202026'
-          r=requests.get(URL,timeout=30,headers={'User-Agent':'Mozilla/5.0','Accept-Language':'es-PY,es;q=0.9'})
-          print('HTTP',r.status_code,'LEN',len(r.text),'URL',r.url)
-          r.raise_for_status()
+          BASE='https://www.dnit.gov.py'
+          SEARCH=BASE+'/web/portal-institucional/search?delta=60&q=Tipos%20de%20cambios%20del%20mes%20de%20Agosto%202026'
+          H={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64)','Accept-Language':'es-PY,es;q=0.9'}
+          s=requests.Session(); s.headers.update(H)
+          r=s.get(SEARCH,timeout=30); print('SEARCH_HTTP',r.status_code,'LEN',len(r.text)); r.raise_for_status()
           doc=html.fromstring(r.content)
+          candidates=[]
+          for a in doc.xpath('//a[@href]'):
+            text=' '.join(a.text_content().split())
+            href=a.get('href') or ''
+            low=(text+' '+href).lower()
+            if 'tipos-de-cambios' in low or 'tipos de cambios' in low:
+              full=urljoin(BASE,href)
+              candidates.append((text,full))
+          print('CANDIDATES',len(candidates))
+          for c in candidates[:20]: print('CANDIDATE',c)
+          target=next((u for t,u in candidates if 'agosto 2026' in t.lower()), None) or next((u for t,u in candidates if 'tipos-de-cambios' in u.lower()),None)
+          assert target, 'No se encontró enlace mensual DNIT'
+          print('TARGET',target)
+          p=s.get(target,timeout=30); print('PAGE_HTTP',p.status_code,'LEN',len(p.text)); p.raise_for_status()
+          pd=html.fromstring(p.content)
           rows=[]
-          for tr in doc.xpath('//tr'):
+          for tr in pd.xpath('//tr'):
             cells=[' '.join(c.text_content().split()) for c in tr.xpath('./th|./td')]
-            if len(cells)>=13 and re.fullmatch(r'\d{1,2}',cells[0]):
-              rows.append(cells)
+            if len(cells)>=13 and re.fullmatch(r'\d{1,2}',cells[0]): rows.append(cells)
           print('ROWS',len(rows))
-          assert rows, 'No se encontró la tabla oficial de cotizaciones'
+          assert rows, 'No se encontró tabla en página mensual DNIT'
           def num(s): return float(s.replace('.','').replace(',','.'))
           rates={int(row[0]): {'usd_buy':num(row[1]),'usd_sell':num(row[2])} for row in rows}
-          print('RATE_01',rates.get(1))
-          print('RATE_07',rates.get(7))
+          print('RATE_01',rates.get(1)); print('RATE_07',rates.get(7))
           assert rates[1]['usd_buy']==5959.05 and rates[1]['usd_sell']==5970.96
           assert rates[7]['usd_buy']==5952.13 and rates[7]['usd_sell']==5953.04
           print('DNIT_FX_OFFICIAL_PAGE_OK')
