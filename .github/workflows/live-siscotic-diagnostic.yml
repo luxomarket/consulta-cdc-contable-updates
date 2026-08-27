@@ -9,65 +9,61 @@ permissions:
   contents: read
 
 jobs:
-  probe:
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
+  probe-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install requests
-        run: pip install 'requests>=2.32,<3'
-      - name: Diagnose exact CDC from user notebook
+      - name: Install test stack
+        run: pip install 'requests>=2.32,<3' 'playwright>=1.50,<2'
+      - name: Test exact user CDC with requests curl and Edge
+        shell: pwsh
         run: |
-          cat > /tmp/probe_user_cdc.py <<'PY'
-          import json, time, requests
+          @'
+          import json, subprocess, time, requests
+          from playwright.sync_api import sync_playwright
 
           HOME='https://cdc.siscotic.com.py/'
-          TEST=HOME+'api/test'
           API=HOME+'api/consultar'
-          USER_CDC='01800228774735001003321522026080112808168839'
-          KNOWN_GOOD='01800268520001001000000422024082310845861483'
-          headers={
-            'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
-            'Accept':'application/json, text/plain, */*',
-            'Accept-Language':'es-PY,es;q=0.9,en;q=0.8',
-            'Referer':HOME,
-            'Cache-Control':'no-cache',
-            'Pragma':'no-cache',
-          }
+          CDC='01800228774735001003321522026080112808168839'
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36'
+          headers={'User-Agent':UA,'Accept':'application/json, text/plain, */*','Accept-Language':'es-PY,es;q=0.9,en;q=0.8','Referer':HOME,'Cache-Control':'no-cache','Pragma':'no-cache'}
 
-          def show(label, r, elapsed):
-            print('\n===', label, '===')
-            print('STATUS', r.status_code, 'ELAPSED', round(elapsed,3), 'CTYPE', r.headers.get('content-type'))
-            print('URL', r.url)
-            print('HEADERS', {k:v for k,v in r.headers.items() if k.lower() in ['server','cf-ray','x-powered-by','retry-after']})
-            print('BODY', r.text[:5000])
-            try:
-              p=r.json(); print('JSON_KEYS', sorted(p.keys()) if isinstance(p,dict) else type(p).__name__)
-              if isinstance(p,dict) and isinstance(p.get('data'),dict): print('DATA_KEYS', sorted(p['data'].keys()))
-            except Exception as e: print('JSON_ERROR',repr(e))
+          def validate(label,status,text,elapsed):
+              print(label,'STATUS',status,'ELAPSED',round(elapsed,3))
+              print(label,'BODY_HEAD',text[:1000])
+              p=json.loads(text)
+              ok=status==200 and p.get('success') is True and p.get('cdc')==CDC and isinstance(p.get('data'),dict)
+              if ok:
+                  d=p['data']; print(label,'TYPE',d.get('timbrado',{}).get('tipo_documento'),'EMISOR',d.get('emisor',{}).get('razon_social'),'TOTAL',d.get('liquidaciones_iva',{}).get('total_general'))
+              print(label,'OK',ok)
+              return ok
 
+          oks=[]
           s=requests.Session(); s.headers.update(headers)
-          t=time.monotonic(); r=s.get(HOME,timeout=15,allow_redirects=True); show('HOME',r,time.monotonic()-t)
-          t=time.monotonic(); r=s.get(TEST,timeout=15,allow_redirects=True); show('TEST',r,time.monotonic()-t)
+          t=time.monotonic(); r=s.get(API,params={'cdc':CDC},timeout=20,allow_redirects=True); oks.append(validate('REQUESTS',r.status_code,r.text,time.monotonic()-t))
 
-          for cdc,label in [(USER_CDC,'USER_CDC_FIRST'),(KNOWN_GOOD,'KNOWN_GOOD'),(USER_CDC,'USER_CDC_SECOND')]:
-            t=time.monotonic()
-            try:
-              r=s.get(API,params={'cdc':cdc},timeout=20,allow_redirects=True)
-              show(label,r,time.monotonic()-t)
-            except Exception as e:
-              print(label,'EXCEPTION',repr(e),'ELAPSED',round(time.monotonic()-t,3))
+          url=API+'?cdc='+CDC
+          cmd=['curl.exe','-sS','-L','--max-time','20','-w','\n__HTTP__%{http_code}',url,'-H',f'User-Agent: {UA}','-H','Accept: application/json, text/plain, */*','-H','Accept-Language: es-PY,es;q=0.9,en;q=0.8','-H',f'Referer: {HOME}','-H','Cache-Control: no-cache','-H','Pragma: no-cache']
+          t=time.monotonic(); cp=subprocess.run(cmd,capture_output=True,text=True,encoding='utf-8',errors='replace'); elapsed=time.monotonic()-t
+          out=cp.stdout; marker='\n__HTTP__'; body,code=(out.rsplit(marker,1) if marker in out else (out,'0')); oks.append(validate('CURL',int(code.strip() or 0),body,elapsed))
 
-          # fresh session to distinguish provider/CDN state from session state
-          s2=requests.Session(); s2.headers.update(headers)
-          t=time.monotonic()
           try:
-            r=s2.get(API,params={'cdc':USER_CDC},timeout=20,allow_redirects=True)
-            show('USER_CDC_FRESH_SESSION',r,time.monotonic()-t)
-          except Exception as e:
-            print('USER_CDC_FRESH_SESSION EXCEPTION',repr(e),'ELAPSED',round(time.monotonic()-t,3))
-          PY
-          python /tmp/probe_user_cdc.py
+              with sync_playwright() as p:
+                  browser=p.chromium.launch(channel='msedge',headless=True)
+                  page=browser.new_page(locale='es-PY')
+                  page.goto(HOME,wait_until='domcontentloaded',timeout=20000)
+                  t=time.monotonic()
+                  res=page.evaluate("""async ({cdc}) => { const r=await fetch('/api/consultar?cdc='+encodeURIComponent(cdc), {headers:{'Accept':'application/json, text/plain, */*','Cache-Control':'no-cache','Pragma':'no-cache'}}); return {status:r.status,text:await r.text()}; }""", {'cdc':CDC})
+                  oks.append(validate('EDGE_FETCH',int(res['status']),res['text'],time.monotonic()-t))
+                  browser.close()
+          except Exception as exc:
+              print('EDGE_FETCH_EXCEPTION',repr(exc)); oks.append(False)
+
+          print('RESULTS',oks)
+          assert any(oks), 'ningún transporte Windows pudo consultar el CDC'
+          '@ | Set-Content -Path $env:RUNNER_TEMP\probe.py -Encoding utf8
+          python $env:RUNNER_TEMP\probe.py
