@@ -18,52 +18,67 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install test stack
-        run: pip install 'requests>=2.32,<3' 'playwright>=1.50,<2'
-      - name: Test exact user CDC with requests curl and Edge
+        run: pip install 'requests>=2.32,<3'
+      - name: Validate v1.5.6 env migration
+        shell: pwsh
+        run: |
+          $p = Join-Path $env:RUNNER_TEMP '.env'
+          @'
+          DIRECT_PROVIDER=multi
+          SISCOTIC_ENABLED=true
+          SISCOTIC_BROWSER_ENABLED=true
+          SISCOTIC_NATIVE_BROWSER_ENABLED=true
+          SISCOTIC_NATIVE_WARMUP=true
+          SISCOTIC_BROWSER_TIMEOUT_SECONDS=7
+          SISCOTIC_HTTP_DIRECT_ENABLED=false
+          DIRECT_REQUEST_TIMEOUT_SECONDS=10
+          PROVIDER_PARALLEL_TIMEOUT_SECONDS=8
+          CACHE_FIRST_ENABLED=true
+          DIRECT_API_KEY=KEEP_ME
+          '@ | Set-Content $p -Encoding utf8
+          $s=Get-Content $p -Raw
+          $obsolete='(?m)^(SISCOTIC_HTTP_DIRECT_ENABLED|SISCOTIC_BROWSER_ENABLED|SISCOTIC_NATIVE_BROWSER_ENABLED|SISCOTIC_NATIVE_WARMUP|SISCOTIC_BROWSER_TIMEOUT_SECONDS)=.*(?:\r?\n|$)'; $s=[regex]::Replace($s,$obsolete,'')
+          $pairs=@{DIRECT_PROVIDER='multi';SISCOTIC_ENABLED='true';SISCOTIC_AUTO_ENABLED='true';SISCOTIC_CURL_FALLBACK_ENABLED='true';EKUATIA_PUBLIC_AUTOMATION_ENABLED='false';DIRECT_REQUEST_TIMEOUT_SECONDS='20';DIRECT_REQUEST_RETRIES='1';PROVIDER_PARALLEL_ENABLED='true';PROVIDER_PARALLEL_TIMEOUT_SECONDS='22';PROVIDER_PARALLEL_MAX_WORKERS='4';CACHE_FIRST_ENABLED='true';CACHE_TTL_HOURS='24';RETRY_WORKER_ENABLED='false'}
+          foreach($k in $pairs.Keys){$v=$pairs[$k]; if($s -match ('(?m)^'+[regex]::Escape($k)+'=.*$')){$s=[regex]::Replace($s,('(?m)^'+[regex]::Escape($k)+'=.*$'),($k+'='+$v))}else{$s += [Environment]::NewLine+$k+'='+$v+[Environment]::NewLine}}
+          Set-Content -Path $p -Value $s -Encoding UTF8
+          $final=Get-Content $p -Raw
+          Write-Host $final
+          if($final -match '(?m)^SISCOTIC_HTTP_DIRECT_ENABLED='){throw 'legacy direct flag remains'}
+          if($final -match '(?m)^SISCOTIC_BROWSER_ENABLED='){throw 'legacy browser flag remains'}
+          if($final -notmatch '(?m)^SISCOTIC_AUTO_ENABLED=true$'){throw 'auto provider not enabled'}
+          if($final -notmatch '(?m)^SISCOTIC_CURL_FALLBACK_ENABLED=true$'){throw 'curl fallback not enabled'}
+          if($final -notmatch '(?m)^DIRECT_REQUEST_TIMEOUT_SECONDS=20$'){throw 'timeout not migrated'}
+          if($final -notmatch '(?m)^PROVIDER_PARALLEL_TIMEOUT_SECONDS=22$'){throw 'parallel timeout not migrated'}
+          if($final -notmatch '(?m)^DIRECT_API_KEY=KEEP_ME$'){throw 'user credential lost'}
+          Write-Host 'ENV_MIGRATION_V156_OK'
+      - name: Test exact user CDC with Windows requests and curl
         shell: pwsh
         run: |
           @'
-          import json, subprocess, time, requests
-          from playwright.sync_api import sync_playwright
-
+          import json, os, subprocess, time, requests
           HOME='https://cdc.siscotic.com.py/'
           API=HOME+'api/consultar'
           CDC='01800228774735001003321522026080112808168839'
           UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36'
           headers={'User-Agent':UA,'Accept':'application/json, text/plain, */*','Accept-Language':'es-PY,es;q=0.9,en;q=0.8','Referer':HOME,'Cache-Control':'no-cache','Pragma':'no-cache'}
-
           def validate(label,status,text,elapsed):
-              print(label,'STATUS',status,'ELAPSED',round(elapsed,3))
-              print(label,'BODY_HEAD',text[:1000])
               p=json.loads(text)
               ok=status==200 and p.get('success') is True and p.get('cdc')==CDC and isinstance(p.get('data'),dict)
+              print(label,'STATUS',status,'ELAPSED',round(elapsed,3),'OK',ok)
               if ok:
-                  d=p['data']; print(label,'TYPE',d.get('timbrado',{}).get('tipo_documento'),'EMISOR',d.get('emisor',{}).get('razon_social'),'TOTAL',d.get('liquidaciones_iva',{}).get('total_general'))
-              print(label,'OK',ok)
+                  d=p['data']; print(label,'TYPE',d.get('timbrado',{}).get('tipo_documento'),'EMISOR',d.get('emisor',{}).get('razon_social'),'TOTAL',d.get('liquidaciones_iva',{}).get('total_general'),'ITEMS',len(d.get('items') or []))
               return ok
-
           oks=[]
           s=requests.Session(); s.headers.update(headers)
           t=time.monotonic(); r=s.get(API,params={'cdc':CDC},timeout=20,allow_redirects=True); oks.append(validate('REQUESTS',r.status_code,r.text,time.monotonic()-t))
-
+          system_root=os.environ.get('SystemRoot') or os.environ.get('WINDIR') or r'C:\Windows'
+          curl=os.path.join(system_root,'System32','curl.exe')
           url=API+'?cdc='+CDC
-          cmd=['curl.exe','-sS','-L','--max-time','20','-w','\n__HTTP__%{http_code}',url,'-H',f'User-Agent: {UA}','-H','Accept: application/json, text/plain, */*','-H','Accept-Language: es-PY,es;q=0.9,en;q=0.8','-H',f'Referer: {HOME}','-H','Cache-Control: no-cache','-H','Pragma: no-cache']
+          cmd=[curl,'-sS','-L','--max-time','20','-w','\n__HTTP__%{http_code}',url,'-H',f'User-Agent: {UA}','-H','Accept: application/json, text/plain, */*','-H','Accept-Language: es-PY,es;q=0.9,en;q=0.8','-H',f'Referer: {HOME}','-H','Cache-Control: no-cache','-H','Pragma: no-cache']
           t=time.monotonic(); cp=subprocess.run(cmd,capture_output=True,text=True,encoding='utf-8',errors='replace'); elapsed=time.monotonic()-t
-          out=cp.stdout; marker='\n__HTTP__'; body,code=(out.rsplit(marker,1) if marker in out else (out,'0')); oks.append(validate('CURL',int(code.strip() or 0),body,elapsed))
-
-          try:
-              with sync_playwright() as p:
-                  browser=p.chromium.launch(channel='msedge',headless=True)
-                  page=browser.new_page(locale='es-PY')
-                  page.goto(HOME,wait_until='domcontentloaded',timeout=20000)
-                  t=time.monotonic()
-                  res=page.evaluate("""async ({cdc}) => { const r=await fetch('/api/consultar?cdc='+encodeURIComponent(cdc), {headers:{'Accept':'application/json, text/plain, */*','Cache-Control':'no-cache','Pragma':'no-cache'}}); return {status:r.status,text:await r.text()}; }""", {'cdc':CDC})
-                  oks.append(validate('EDGE_FETCH',int(res['status']),res['text'],time.monotonic()-t))
-                  browser.close()
-          except Exception as exc:
-              print('EDGE_FETCH_EXCEPTION',repr(exc)); oks.append(False)
-
+          out=cp.stdout; marker='\n__HTTP__'; body,code=(out.rsplit(marker,1) if marker in out else (out,'0')); oks.append(validate('CURL_SYSTEM32',int(code.strip() or 0),body,elapsed))
           print('RESULTS',oks)
-          assert any(oks), 'ningún transporte Windows pudo consultar el CDC'
+          assert all(oks), 'Windows requests/curl validation failed'
+          print('LIVE_WINDOWS_V156_OK')
           '@ | Set-Content -Path $env:RUNNER_TEMP\probe.py -Encoding utf8
           python $env:RUNNER_TEMP\probe.py
