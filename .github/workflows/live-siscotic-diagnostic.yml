@@ -1,4 +1,4 @@
-name: Live DNIT FX diagnostic
+name: Live SisCoTic v1.5.8 diagnostic
 
 on:
   pull_request:
@@ -9,57 +9,108 @@ permissions:
   contents: read
 
 jobs:
-  dnit-fx-windows:
+  native-browser-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1,2,3,4]
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install stack
-        run: pip install 'requests>=2.32,<3' 'lxml>=5,<7'
-      - name: Discover and parse official DNIT exchange rates
+      - run: pip install 'playwright>=1.50,<2'
+      - name: Validate exact v1.5.8 launch and query
         shell: pwsh
         run: |
           @'
-          import re
-          from urllib.parse import urljoin
-          import requests
-          from lxml import html
+          import json, os, re, socket, subprocess, tempfile, time, urllib.request
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          HOME='https://cdc.siscotic.com.py/'
+          CDC='01800228774735001003321522026080112808168839'
+          profile=Path(tempfile.mkdtemp(prefix='cdc-v158-'))
+          candidates=[Path(os.environ.get('PROGRAMFILES(X86)',''))/'Microsoft'/'Edge'/'Application'/'msedge.exe',Path(os.environ.get('PROGRAMFILES',''))/'Microsoft'/'Edge'/'Application'/'msedge.exe',Path(os.environ.get('PROGRAMFILES',''))/'Google'/'Chrome'/'Application'/'chrome.exe']
+          exe=next((p for p in candidates if p.is_file()),None); assert exe, 'No browser'
+          with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as s: s.bind(('127.0.0.1',0)); port=s.getsockname()[1]
+          args=[str(exe),f'--remote-debugging-port={port}',f'--user-data-dir={profile}','--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-component-update','--disable-features=Translate,MediaRouter','--window-position=-32000,-32000','--window-size=1200,900','--start-minimized','about:blank']
+          si=subprocess.STARTUPINFO(); si.dwFlags |= subprocess.STARTF_USESHOWWINDOW; si.wShowWindow=6
+          proc=subprocess.Popen(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL,creationflags=getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0),startupinfo=si)
+          endpoint=f'http://127.0.0.1:{port}/json/version'; deadline=time.monotonic()+20; launcher_exit=None
+          while time.monotonic()<deadline:
+            try:
+              with urllib.request.urlopen(endpoint,timeout=.45) as r:
+                meta=json.loads(r.read().decode())
+              if meta.get('webSocketDebuggerUrl'): break
+            except Exception: pass
+            if proc.poll() is not None: launcher_exit=proc.returncode
+            time.sleep(.1)
+          else: raise AssertionError(f'CDP unavailable launcher_exit={launcher_exit}')
+          print('CDP_READY launcher_exit=',launcher_exit,'exe=',exe.name)
+          pw=sync_playwright().start(); browser=pw.chromium.connect_over_cdp(f'http://127.0.0.1:{port}',timeout=20000)
+          context=browser.contexts[0]; page=context.pages[0]; page.set_default_timeout(30000); page.set_default_navigation_timeout(30000)
+          page.goto(HOME,wait_until='domcontentloaded',timeout=30000)
+          deadline=time.monotonic()+30
+          while time.monotonic()<deadline:
+            field=page.locator('#searchInput')
+            if field.count() and field.first.is_visible(): break
+            page.wait_for_timeout(250)
+          else: raise AssertionError('CDC field not available; body='+page.locator('body').inner_text()[:700])
+          field.first.fill(CDC); t=time.monotonic()
+          with page.expect_response(lambda r:'/api/consultar' in r.url,timeout=30000) as info:
+            page.get_by_role('button',name=re.compile(r'^\s*Consultar\s*$',re.I)).first.click()
+          resp=info.value; payload=json.loads(resp.text()); elapsed=time.monotonic()-t
+          d=payload.get('data') or {}; ok=resp.status==200 and payload.get('success') is True and d.get('emisor',{}).get('razon_social')=='FARMA S.A.' and d.get('timbrado',{}).get('numero_documento')=='0033215' and d.get('liquidaciones_iva',{}).get('total_general')==372850
+          print('RESULT',resp.status,round(elapsed,3),d.get('emisor',{}).get('razon_social'),d.get('timbrado',{}).get('numero_documento'),d.get('liquidaciones_iva',{}).get('total_general'))
+          assert ok
+          browser.close(); pw.stop()
+          print('V158_NATIVE_OK')
+          '@ | Set-Content $env:RUNNER_TEMP\probe.py -Encoding utf8
+          python $env:RUNNER_TEMP\probe.py
 
-          BASE='https://www.dnit.gov.py'
-          SEARCH=BASE+'/web/portal-institucional/search?delta=60&q=Tipos%20de%20cambios%20del%20mes%20de%20Agosto%202026'
-          H={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64)','Accept-Language':'es-PY,es;q=0.9'}
-          s=requests.Session(); s.headers.update(H)
-          r=s.get(SEARCH,timeout=30); print('SEARCH_HTTP',r.status_code,'LEN',len(r.text)); r.raise_for_status()
-          doc=html.fromstring(r.content)
-          candidates=[]
-          for a in doc.xpath('//a[@href]'):
-            text=' '.join(a.text_content().split())
-            href=a.get('href') or ''
-            low=(text+' '+href).lower()
-            if 'tipos-de-cambios' in low or 'tipos de cambios' in low:
-              full=urljoin(BASE,href)
-              candidates.append((text,full))
-          print('CANDIDATES',len(candidates))
-          for c in candidates[:20]: print('CANDIDATE',c)
-          target=next((u for t,u in candidates if 'agosto 2026' in t.lower()), None) or next((u for t,u in candidates if 'tipos-de-cambios' in u.lower()),None)
-          assert target, 'No se encontró enlace mensual DNIT'
-          print('TARGET',target)
-          p=s.get(target,timeout=30); print('PAGE_HTTP',p.status_code,'LEN',len(p.text)); p.raise_for_status()
-          pd=html.fromstring(p.content)
-          rows=[]
-          for tr in pd.xpath('//tr'):
-            cells=[' '.join(c.text_content().split()) for c in tr.xpath('./th|./td')]
-            if len(cells)>=13 and re.fullmatch(r'\d{1,2}',cells[0]): rows.append(cells)
-          print('ROWS',len(rows))
-          assert rows, 'No se encontró tabla en página mensual DNIT'
-          def num(s): return float(s.replace('.','').replace(',','.'))
-          rates={int(row[0]): {'usd_buy':num(row[1]),'usd_sell':num(row[2])} for row in rows}
-          print('RATE_01',rates.get(1)); print('RATE_07',rates.get(7))
-          assert rates[1]['usd_buy']==5959.05 and rates[1]['usd_sell']==5970.96
-          assert rates[7]['usd_buy']==5952.13 and rates[7]['usd_sell']==5953.04
-          print('DNIT_FX_OFFICIAL_PAGE_OK')
-          '@ | Set-Content -Path $env:RUNNER_TEMP\dnit_fx_probe.py -Encoding utf8
-          python $env:RUNNER_TEMP\dnit_fx_probe.py
+  mixed-real-cdc:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install 'playwright>=1.50,<2'
+      - name: Query eight real CDCs in one v1.5.8 browser session
+        shell: pwsh
+        run: |
+          @'
+          import json, os, re, socket, subprocess, tempfile, time, urllib.request
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          HOME='https://cdc.siscotic.com.py/'
+          CASES=['01800228774735001003321522026080112808168839','05800018125001004001467712025050917914375148','01800268520001001000000422024082310845861483','01800774060069002030118622026080214930621220','01800005198001003858591122026081512010621690','01800140664045005028736522026080310859704441','01800032969008007005097122026080715911140787','01801021383001001000477022026061515772623429']
+          profile=Path(tempfile.mkdtemp(prefix='cdc-v158-mixed-'))
+          exe=Path(os.environ['PROGRAMFILES(X86)'])/'Microsoft'/'Edge'/'Application'/'msedge.exe'; assert exe.is_file()
+          with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as s: s.bind(('127.0.0.1',0)); port=s.getsockname()[1]
+          args=[str(exe),f'--remote-debugging-port={port}',f'--user-data-dir={profile}','--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-component-update','--disable-features=Translate,MediaRouter','--window-position=-32000,-32000','--window-size=1200,900','--start-minimized','about:blank']
+          si=subprocess.STARTUPINFO(); si.dwFlags |= subprocess.STARTF_USESHOWWINDOW; si.wShowWindow=6
+          proc=subprocess.Popen(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL,creationflags=getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0),startupinfo=si)
+          ep=f'http://127.0.0.1:{port}/json/version'; deadline=time.monotonic()+20
+          while time.monotonic()<deadline:
+            try:
+              with urllib.request.urlopen(ep,timeout=.45) as r:
+                if json.loads(r.read().decode()).get('webSocketDebuggerUrl'): break
+            except Exception: pass
+            time.sleep(.1)
+          else: raise AssertionError('CDP timeout')
+          pw=sync_playwright().start(); browser=pw.chromium.connect_over_cdp(f'http://127.0.0.1:{port}',timeout=20000); context=browser.contexts[0]; page=context.pages[0]; page.set_default_timeout(30000); page.set_default_navigation_timeout(30000)
+          page.goto(HOME,wait_until='domcontentloaded',timeout=30000)
+          field=page.locator('#searchInput'); field.wait_for(state='visible',timeout=30000)
+          ok=0
+          for cdc in CASES:
+            field.fill(cdc); t=time.monotonic()
+            with page.expect_response(lambda r:'/api/consultar' in r.url,timeout=30000) as info: page.get_by_role('button',name=re.compile(r'^\s*Consultar\s*$',re.I)).first.click()
+            resp=info.value; payload=json.loads(resp.text()); d=payload.get('data') or {}; found=resp.status==200 and payload.get('success') is True and d.get('emisor',{}).get('ruc') and d.get('timbrado',{}).get('numero_documento') and d.get('liquidaciones_iva',{}).get('total_general') is not None
+            print('CASE',cdc,resp.status,round(time.monotonic()-t,3),d.get('timbrado',{}).get('tipo_documento'),d.get('emisor',{}).get('razon_social'),d.get('timbrado',{}).get('numero_documento'),d.get('liquidaciones_iva',{}).get('total_general'))
+            assert found; ok+=1; page.wait_for_timeout(200)
+          assert ok==len(CASES); print('V158_MIXED_8_OF_8_OK')
+          browser.close(); pw.stop()
+          '@ | Set-Content $env:RUNNER_TEMP\mixed.py -Encoding utf8
+          python $env:RUNNER_TEMP\mixed.py
