@@ -46,7 +46,6 @@ jobs:
                   ok=bool(d.get('emisor',{}).get('ruc') and d.get('emisor',{}).get('razon_social') and d.get('timbrado',{}).get('numero_documento') and d.get('liquidaciones_iva',{}).get('total_general') is not None)
               return ok, p
 
-          # Direct probe: may be 200 or 403 depending on Imunify360/IP.
           s=requests.Session(); s.headers.update(headers)
           t=time.monotonic()
           try:
@@ -97,7 +96,7 @@ jobs:
                   page.locator('#searchInput').fill(CDC)
                   qstart=time.monotonic()
                   with page.expect_response(lambda resp: '/api/consultar' in resp.url,timeout=30000) as info:
-                      page.locator('button[type="submit"]').click()
+                      page.get_by_role('button',name=re.compile(r'^\s*Consultar\s*$',re.I)).first.click()
                   resp=info.value; text=resp.text(); ok,payload=valid_payload(resp.status,text)
                   result.update(done=True,ok=ok,status=resp.status,elapsed=time.monotonic()-qstart,body=text[:500],error=None)
                   if ok:
