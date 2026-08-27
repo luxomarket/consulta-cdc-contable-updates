@@ -9,9 +9,9 @@ permissions:
   contents: read
 
 jobs:
-  mixed-cdc-windows:
+  production-edge-flags:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 12
     steps:
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -19,77 +19,52 @@ jobs:
           python-version: '3.12'
       - name: Install stack
         run: pip install 'playwright>=1.50,<2'
-      - name: Query mixed CDC set with one native Edge session
+      - name: Validate production native Edge flags
         shell: pwsh
         run: |
           @'
           import json, os, re, socket, subprocess, tempfile, threading, time, urllib.request
           from pathlib import Path
-
           HOME='https://cdc.siscotic.com.py/'
-          CASES=[
-            ('USER_FAILING','01800228774735001003321522026080112808168839'),
-            ('NCE','05800018125001004001467712025050917914375148'),
-            ('CANCELADA','01800268520001001000000422024082310845861483'),
-            ('USER_7406','01800774060069002030118622026080214930621220'),
-            ('USER_5198','01800005198001003858591122026081512010621690'),
-            ('USER_1406','01800140664045005028736522026080310859704441'),
-            ('USER_3296','01800032969008007005097122026080715911140787'),
-            ('USER_1021','01801021383001001000477022026061515772623429'),
-          ]
-          output={'done':False,'results':[],'error':None}
-
+          CASES=[('USER','01800228774735001003321522026080112808168839'),('NCE','05800018125001004001467712025050917914375148')]
+          result={'ok':False,'rows':[],'error':None}
           def worker():
             proc=pw=browser=None
-            profile=Path(tempfile.mkdtemp(prefix='cdc-mixed-edge-'))
+            profile=Path(tempfile.mkdtemp(prefix='cdc-prod-edge-'))
             try:
               candidates=[Path(os.environ.get('PROGRAMFILES(X86)',''))/'Microsoft'/'Edge'/'Application'/'msedge.exe',Path(os.environ.get('PROGRAMFILES',''))/'Microsoft'/'Edge'/'Application'/'msedge.exe']
-              exe=next((p for p in candidates if p.is_file()),None)
-              if not exe: raise RuntimeError('Edge no encontrado')
-              with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as sock:
-                sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
-              args=[str(exe),f'--remote-debugging-port={port}',f'--user-data-dir={profile}','--no-first-run','--no-default-browser-check','--window-position=-32000,-32000','--window-size=1200,900','--start-minimized','about:blank']
+              exe=next((p for p in candidates if p.is_file()),None); assert exe
+              with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as sock: sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
+              args=[str(exe),f'--remote-debugging-port={port}',f'--user-data-dir={profile}','--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-component-update','--disable-features=Translate,MediaRouter','--window-position=-32000,-32000','--window-size=1200,900','--start-minimized','about:blank']
               si=subprocess.STARTUPINFO(); si.dwFlags |= subprocess.STARTF_USESHOWWINDOW; si.wShowWindow=6
               proc=subprocess.Popen(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL,creationflags=getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0),startupinfo=si)
-              endpoint=f'http://127.0.0.1:{port}/json/version'; deadline=time.monotonic()+12
+              ep=f'http://127.0.0.1:{port}/json/version'; deadline=time.monotonic()+10
               while time.monotonic()<deadline:
                 try:
-                  with urllib.request.urlopen(endpoint,timeout=.5) as rr:
-                    if json.loads(rr.read().decode('utf-8')).get('webSocketDebuggerUrl'): break
-                except Exception: time.sleep(.1)
+                  with urllib.request.urlopen(ep,timeout=.35) as rr:
+                    if json.loads(rr.read().decode()).get('webSocketDebuggerUrl'): break
+                except Exception: time.sleep(.08)
               else: raise RuntimeError('CDP timeout')
               from playwright.sync_api import sync_playwright
-              pw=sync_playwright().start(); browser=pw.chromium.connect_over_cdp(f'http://127.0.0.1:{port}',timeout=12000)
-              context=browser.contexts[0] if browser.contexts else browser.new_context(locale='es-PY')
-              page=context.pages[0] if context.pages else context.new_page(); page.set_default_timeout(30000); page.set_default_navigation_timeout(30000)
-              page.goto(HOME,wait_until='domcontentloaded',timeout=30000)
+              pw=sync_playwright().start(); browser=pw.chromium.connect_over_cdp(f'http://127.0.0.1:{port}',timeout=20000)
+              context=browser.contexts[0]; page=context.pages[0]; page.set_default_timeout(20000); page.set_default_navigation_timeout(20000)
+              page.goto(HOME,wait_until='domcontentloaded',timeout=20000)
               try:
-                b=page.get_by_role('button',name=re.compile(r'Ahora no',re.I))
-                if b.count() and b.first.is_visible(): b.first.click(timeout=1000)
+                b=page.get_by_role('button',name=re.compile(r'Ahora no',re.I));
+                if b.count() and b.first.is_visible(): b.first.click(timeout=700)
               except Exception: pass
               for label,cdc in CASES:
-                page.locator('#searchInput').fill(cdc); started=time.monotonic()
-                try:
-                  with page.expect_response(lambda resp: '/api/consultar' in resp.url,timeout=30000) as info:
-                    page.get_by_role('button',name=re.compile(r'^\s*Consultar\s*$',re.I)).first.click()
-                  resp=info.value; text=resp.text(); elapsed=time.monotonic()-started
-                  try: payload=json.loads(text)
-                  except Exception: payload={}
-                  found=resp.status==200 and payload.get('success') is True and isinstance(payload.get('data'),dict)
-                  not_found=(resp.status==404 or payload.get('success') is False) and any(t in str(payload.get('error') or payload.get('message') or '').lower() for t in ['no encontr','no exist','cancelado'])
-                  row={'label':label,'cdc':cdc,'status':resp.status,'elapsed':round(elapsed,3),'found':found,'not_found':not_found,'error':payload.get('error') or payload.get('message')}
-                  if found:
-                    d=payload['data']; row.update(type=d.get('timbrado',{}).get('tipo_documento'),emisor=d.get('emisor',{}).get('razon_social'),doc=d.get('timbrado',{}).get('numero_documento'),items=len(d.get('items') or []),total=d.get('liquidaciones_iva',{}).get('total_general'))
-                    assert d.get('emisor',{}).get('ruc') and d.get('emisor',{}).get('razon_social') and d.get('timbrado',{}).get('numero_documento') and d.get('liquidaciones_iva',{}).get('total_general') is not None, row
-                  elif not not_found:
-                    raise RuntimeError(f'{label} respuesta no válida HTTP {resp.status}: {text[:500]}')
-                  output['results'].append(row); print('CASE',json.dumps(row,ensure_ascii=False))
-                  page.wait_for_timeout(250)
-                except Exception as exc:
-                  output['results'].append({'label':label,'cdc':cdc,'fatal':repr(exc)}); raise
-              output['done']=True
-            except Exception as exc:
-              output['error']=repr(exc)
+                page.locator('#searchInput').fill(cdc); t=time.monotonic()
+                with page.expect_response(lambda resp:'/api/consultar' in resp.url,timeout=20000) as info:
+                  page.get_by_role('button',name=re.compile(r'^\s*Consultar\s*$',re.I)).first.click()
+                resp=info.value; payload=json.loads(resp.text()); elapsed=time.monotonic()-t
+                ok=resp.status==200 and payload.get('success') is True and isinstance(payload.get('data'),dict)
+                d=payload.get('data') or {}
+                row={'label':label,'status':resp.status,'elapsed':round(elapsed,3),'ok':ok,'emisor':d.get('emisor',{}).get('razon_social'),'doc':d.get('timbrado',{}).get('numero_documento'),'total':d.get('liquidaciones_iva',{}).get('total_general')}
+                print('ROW',json.dumps(row,ensure_ascii=False)); result['rows'].append(row)
+                assert ok and row['emisor'] and row['doc'] and row['total'] is not None
+              result['ok']=True
+            except Exception as exc: result['error']=repr(exc)
             finally:
               try:
                 if browser: browser.close()
@@ -100,14 +75,9 @@ jobs:
               try:
                 if proc and proc.poll() is None: proc.terminate()
               except Exception: pass
-          th=threading.Thread(target=worker,daemon=True); th.start(); th.join(180)
-          print('SUMMARY',json.dumps(output,ensure_ascii=False,indent=2))
-          if th.is_alive(): raise SystemExit('MIXED_EDGE_TIMEOUT')
-          if not output['done']: raise SystemExit(output['error'] or 'mixed validation failed')
-          assert len(output['results'])==len(CASES)
-          assert output['results'][0].get('found') is True
-          assert output['results'][1].get('found') is True and 'crédito' in str(output['results'][1].get('type') or '').lower()
-          assert output['results'][2].get('found') is True
-          print('MIXED_REAL_CDC_SET_OK')
+          th=threading.Thread(target=worker,daemon=True); th.start(); th.join(90)
+          print('FINAL',json.dumps(result,ensure_ascii=False))
+          assert not th.is_alive() and result['ok'], result
+          print('PRODUCTION_EDGE_FLAGS_OK')
           '@ | Set-Content -Path $env:RUNNER_TEMP\probe.py -Encoding utf8
           python $env:RUNNER_TEMP\probe.py
