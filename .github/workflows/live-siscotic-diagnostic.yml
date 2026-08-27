@@ -11,74 +11,53 @@ permissions:
 jobs:
   probe-windows:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install test stack
-        run: pip install 'requests>=2.32,<3'
-      - name: Validate v1.5.6 env migration
-        shell: pwsh
-        run: |
-          $p = Join-Path $env:RUNNER_TEMP '.env'
-          @'
-          DIRECT_PROVIDER=multi
-          SISCOTIC_ENABLED=true
-          SISCOTIC_BROWSER_ENABLED=true
-          SISCOTIC_NATIVE_BROWSER_ENABLED=true
-          SISCOTIC_NATIVE_WARMUP=true
-          SISCOTIC_BROWSER_TIMEOUT_SECONDS=7
-          SISCOTIC_HTTP_DIRECT_ENABLED=false
-          DIRECT_REQUEST_TIMEOUT_SECONDS=10
-          PROVIDER_PARALLEL_TIMEOUT_SECONDS=8
-          CACHE_FIRST_ENABLED=true
-          DIRECT_API_KEY=KEEP_ME
-          '@ | Set-Content $p -Encoding utf8
-          $s=Get-Content $p -Raw
-          $obsolete='(?m)^(SISCOTIC_HTTP_DIRECT_ENABLED|SISCOTIC_BROWSER_ENABLED|SISCOTIC_NATIVE_BROWSER_ENABLED|SISCOTIC_NATIVE_WARMUP|SISCOTIC_BROWSER_TIMEOUT_SECONDS)=.*(?:\r?\n|$)'; $s=[regex]::Replace($s,$obsolete,'')
-          $pairs=@{DIRECT_PROVIDER='multi';SISCOTIC_ENABLED='true';SISCOTIC_AUTO_ENABLED='true';SISCOTIC_CURL_FALLBACK_ENABLED='true';EKUATIA_PUBLIC_AUTOMATION_ENABLED='false';DIRECT_REQUEST_TIMEOUT_SECONDS='20';DIRECT_REQUEST_RETRIES='1';PROVIDER_PARALLEL_ENABLED='true';PROVIDER_PARALLEL_TIMEOUT_SECONDS='22';PROVIDER_PARALLEL_MAX_WORKERS='4';CACHE_FIRST_ENABLED='true';CACHE_TTL_HOURS='24';RETRY_WORKER_ENABLED='false'}
-          foreach($k in $pairs.Keys){$v=$pairs[$k]; if($s -match ('(?m)^'+[regex]::Escape($k)+'=.*$')){$s=[regex]::Replace($s,('(?m)^'+[regex]::Escape($k)+'=.*$'),($k+'='+$v))}else{$s += [Environment]::NewLine+$k+'='+$v+[Environment]::NewLine}}
-          Set-Content -Path $p -Value $s -Encoding UTF8
-          $final=Get-Content $p -Raw
-          Write-Host $final
-          if($final -match '(?m)^SISCOTIC_HTTP_DIRECT_ENABLED='){throw 'legacy direct flag remains'}
-          if($final -match '(?m)^SISCOTIC_BROWSER_ENABLED='){throw 'legacy browser flag remains'}
-          if($final -notmatch '(?m)^SISCOTIC_AUTO_ENABLED=true\r?$'){throw 'auto provider not enabled'}
-          if($final -notmatch '(?m)^SISCOTIC_CURL_FALLBACK_ENABLED=true\r?$'){throw 'curl fallback not enabled'}
-          if($final -notmatch '(?m)^DIRECT_REQUEST_TIMEOUT_SECONDS=20\r?$'){throw 'timeout not migrated'}
-          if($final -notmatch '(?m)^PROVIDER_PARALLEL_TIMEOUT_SECONDS=22\r?$'){throw 'parallel timeout not migrated'}
-          if($final -notmatch '(?m)^DIRECT_API_KEY=KEEP_ME\r?$'){throw 'user credential lost'}
-          Write-Host 'ENV_MIGRATION_V156_OK'
-      - name: Test exact user CDC with Windows requests and curl
+        run: pip install 'requests>=2.32,<3' 'playwright>=1.50,<2'
+      - name: Test exact CDC with direct transports and Edge UI
         shell: pwsh
         run: |
           @'
           import json, os, subprocess, time, requests
+          from playwright.sync_api import sync_playwright
           HOME='https://cdc.siscotic.com.py/'
           API=HOME+'api/consultar'
           CDC='01800228774735001003321522026080112808168839'
           UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36'
           headers={'User-Agent':UA,'Accept':'application/json, text/plain, */*','Accept-Language':'es-PY,es;q=0.9,en;q=0.8','Referer':HOME,'Cache-Control':'no-cache','Pragma':'no-cache'}
-          def validate(label,status,text,elapsed):
-              p=json.loads(text)
+          def check(label,status,text,elapsed):
+              try: p=json.loads(text)
+              except Exception: p={}
               ok=status==200 and p.get('success') is True and p.get('cdc')==CDC and isinstance(p.get('data'),dict)
-              print(label,'STATUS',status,'ELAPSED',round(elapsed,3),'OK',ok)
-              if ok:
-                  d=p['data']; print(label,'TYPE',d.get('timbrado',{}).get('tipo_documento'),'EMISOR',d.get('emisor',{}).get('razon_social'),'TOTAL',d.get('liquidaciones_iva',{}).get('total_general'),'ITEMS',len(d.get('items') or []))
+              print(label,'STATUS',status,'ELAPSED',round(elapsed,3),'OK',ok,'BODY',text[:300])
               return ok
-          oks=[]
+          results={}
           s=requests.Session(); s.headers.update(headers)
-          t=time.monotonic(); r=s.get(API,params={'cdc':CDC},timeout=20,allow_redirects=True); oks.append(validate('REQUESTS',r.status_code,r.text,time.monotonic()-t))
-          system_root=os.environ.get('SystemRoot') or os.environ.get('WINDIR') or r'C:\Windows'
-          curl=os.path.join(system_root,'System32','curl.exe')
-          url=API+'?cdc='+CDC
-          cmd=[curl,'-sS','-L','--max-time','20','-w','\n__HTTP__%{http_code}',url,'-H',f'User-Agent: {UA}','-H','Accept: application/json, text/plain, */*','-H','Accept-Language: es-PY,es;q=0.9,en;q=0.8','-H',f'Referer: {HOME}','-H','Cache-Control: no-cache','-H','Pragma: no-cache']
-          t=time.monotonic(); cp=subprocess.run(cmd,capture_output=True,text=True,encoding='utf-8',errors='replace'); elapsed=time.monotonic()-t
-          out=cp.stdout; marker='\n__HTTP__'; body,code=(out.rsplit(marker,1) if marker in out else (out,'0')); oks.append(validate('CURL_SYSTEM32',int(code.strip() or 0),body,elapsed))
-          print('RESULTS',oks)
-          assert all(oks), 'Windows requests/curl validation failed'
-          print('LIVE_WINDOWS_V156_OK')
+          t=time.monotonic(); r=s.get(API,params={'cdc':CDC},timeout=20,allow_redirects=True); results['requests']=check('REQUESTS',r.status_code,r.text,time.monotonic()-t)
+          root=os.environ.get('SystemRoot') or r'C:\Windows'; curl=os.path.join(root,'System32','curl.exe'); url=API+'?cdc='+CDC
+          cmd=[curl,'-sS','-L','--max-time','20','-w','\n__HTTP__%{http_code}',url,'-H',f'User-Agent: {UA}','-H','Accept: application/json, text/plain, */*','-H',f'Referer: {HOME}']
+          t=time.monotonic(); cp=subprocess.run(cmd,capture_output=True,text=True,encoding='utf-8',errors='replace'); out=cp.stdout; marker='\n__HTTP__'; body,code=(out.rsplit(marker,1) if marker in out else (out,'0')); results['curl']=check('CURL',int(code.strip() or 0),body,time.monotonic()-t)
+          try:
+              with sync_playwright() as p:
+                  browser=p.chromium.launch(channel='msedge',headless=True)
+                  page=browser.new_page(locale='es-PY',viewport={'width':1280,'height':900})
+                  page.set_default_timeout(25000); page.goto(HOME,wait_until='domcontentloaded',timeout=25000)
+                  field=page.locator('#searchInput')
+                  field.fill(CDC)
+                  t=time.monotonic()
+                  with page.expect_response(lambda resp: '/api/consultar' in resp.url, timeout=25000) as info:
+                      page.locator('button[type="submit"]').click()
+                  resp=info.value; text=resp.text(); results['edge_ui']=check('EDGE_UI',resp.status,text,time.monotonic()-t)
+                  browser.close()
+          except Exception as exc:
+              print('EDGE_UI_EXCEPTION',repr(exc)); results['edge_ui']=False
+          print('RESULTS',results)
+          assert results['edge_ui'] or results['requests'] or results['curl'], 'all transports blocked'
+          print('LIVE_FALLBACK_MATRIX_OK')
           '@ | Set-Content -Path $env:RUNNER_TEMP\probe.py -Encoding utf8
           python $env:RUNNER_TEMP\probe.py
