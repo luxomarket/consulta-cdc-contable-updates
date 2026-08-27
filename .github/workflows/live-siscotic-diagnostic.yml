@@ -17,58 +17,57 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install exact v1.5.5 HTTP stack
+      - name: Install requests
         run: pip install 'requests>=2.32,<3'
-      - name: Validate invoice and NCE with v1.5.5 requests contract
+      - name: Diagnose exact CDC from user notebook
         run: |
-          cat > /tmp/probe_v155.py <<'PY'
-          import time
-          import requests
+          cat > /tmp/probe_user_cdc.py <<'PY'
+          import json, time, requests
 
-          HOME = 'https://cdc.siscotic.com.py/'
-          API = 'https://cdc.siscotic.com.py/api/consultar'
-          CASES = [
-              ('FACTURA', '01800268520001001000000422024082310845861483', None),
-              ('NCE', '05800018125001004001467712025050917914375148', 'crédito'),
-          ]
-          headers = {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
-              'Accept': 'application/json, text/plain, */*',
-              'Accept-Language': 'es-PY,es;q=0.9,en;q=0.8',
-              'Referer': HOME,
-              'Cache-Control': 'no-cache',
-              'Pragma': 'no-cache',
+          HOME='https://cdc.siscotic.com.py/'
+          TEST=HOME+'api/test'
+          API=HOME+'api/consultar'
+          USER_CDC='01800228774735001003321522026080112808168839'
+          KNOWN_GOOD='01800268520001001000000422024082310845861483'
+          headers={
+            'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
+            'Accept':'application/json, text/plain, */*',
+            'Accept-Language':'es-PY,es;q=0.9,en;q=0.8',
+            'Referer':HOME,
+            'Cache-Control':'no-cache',
+            'Pragma':'no-cache',
           }
-          session = requests.Session(); session.headers.update(headers)
-          successes = 0
-          for label, cdc, expected_type in CASES:
-              start = time.monotonic()
-              r = session.get(API, params={'cdc': cdc}, timeout=15, allow_redirects=True)
-              elapsed = time.monotonic() - start
-              print(label, 'HTTP_STATUS', r.status_code, 'ELAPSED_SECONDS', round(elapsed, 3))
-              payload = r.json()
-              print(label, 'SUCCESS_FIELD', payload.get('success'), 'ORIGIN', payload.get('origen'), 'ERROR', payload.get('error'))
-              if r.status_code != 200 or payload.get('success') is not True:
-                  print(label, 'BODY_HEAD', r.text[:1000])
-                  continue
-              assert payload.get('cdc') == cdc
-              data = payload.get('data'); assert isinstance(data, dict) and data
-              for key in ('informacion_general','emisor','receptor','timbrado','items','liquidaciones_iva'):
-                  assert key in data, f'{label}: falta {key}'
-              emisor=data['emisor']; timbrado=data['timbrado']; liq=data['liquidaciones_iva']
-              assert emisor.get('ruc') and emisor.get('razon_social')
-              assert timbrado.get('establecimiento') and timbrado.get('punto_emision') and timbrado.get('numero_documento')
-              assert isinstance(data.get('items'), list) and data['items']
-              assert liq.get('total_general') is not None
-              tipo = str(timbrado.get('tipo_documento') or '')
-              if expected_type:
-                  assert expected_type.lower() in tipo.lower(), (label, tipo)
-              print(label, 'TYPE', tipo, 'COMPROBANTE', timbrado.get('establecimiento'), timbrado.get('punto_emision'), timbrado.get('numero_documento'), 'ITEMS', len(data['items']), 'TOTAL', liq.get('total_general'))
-              if label == 'NCE':
-                  assoc = data.get('documentos_asociados') or data.get('documento_asociado') or data.get('documentos_asociados_electronicos')
-                  print('NCE_ASSOCIATED_PRESENT', bool(assoc), 'ASSOCIATED_TYPE', type(assoc).__name__ if assoc is not None else None)
-              successes += 1
-          assert successes == len(CASES), f'solo {successes}/{len(CASES)} casos encontrados'
-          print('LIVE_V155_INVOICE_NCE_OK')
+
+          def show(label, r, elapsed):
+            print('\n===', label, '===')
+            print('STATUS', r.status_code, 'ELAPSED', round(elapsed,3), 'CTYPE', r.headers.get('content-type'))
+            print('URL', r.url)
+            print('HEADERS', {k:v for k,v in r.headers.items() if k.lower() in ['server','cf-ray','x-powered-by','retry-after']})
+            print('BODY', r.text[:5000])
+            try:
+              p=r.json(); print('JSON_KEYS', sorted(p.keys()) if isinstance(p,dict) else type(p).__name__)
+              if isinstance(p,dict) and isinstance(p.get('data'),dict): print('DATA_KEYS', sorted(p['data'].keys()))
+            except Exception as e: print('JSON_ERROR',repr(e))
+
+          s=requests.Session(); s.headers.update(headers)
+          t=time.monotonic(); r=s.get(HOME,timeout=15,allow_redirects=True); show('HOME',r,time.monotonic()-t)
+          t=time.monotonic(); r=s.get(TEST,timeout=15,allow_redirects=True); show('TEST',r,time.monotonic()-t)
+
+          for cdc,label in [(USER_CDC,'USER_CDC_FIRST'),(KNOWN_GOOD,'KNOWN_GOOD'),(USER_CDC,'USER_CDC_SECOND')]:
+            t=time.monotonic()
+            try:
+              r=s.get(API,params={'cdc':cdc},timeout=20,allow_redirects=True)
+              show(label,r,time.monotonic()-t)
+            except Exception as e:
+              print(label,'EXCEPTION',repr(e),'ELAPSED',round(time.monotonic()-t,3))
+
+          # fresh session to distinguish provider/CDN state from session state
+          s2=requests.Session(); s2.headers.update(headers)
+          t=time.monotonic()
+          try:
+            r=s2.get(API,params={'cdc':USER_CDC},timeout=20,allow_redirects=True)
+            show('USER_CDC_FRESH_SESSION',r,time.monotonic()-t)
+          except Exception as e:
+            print('USER_CDC_FRESH_SESSION EXCEPTION',repr(e),'ELAPSED',round(time.monotonic()-t,3))
           PY
-          python /tmp/probe_v155.py
+          python /tmp/probe_user_cdc.py
