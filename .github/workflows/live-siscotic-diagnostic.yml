@@ -45,11 +45,11 @@ jobs:
           Write-Host $final
           if($final -match '(?m)^SISCOTIC_HTTP_DIRECT_ENABLED='){throw 'legacy direct flag remains'}
           if($final -match '(?m)^SISCOTIC_BROWSER_ENABLED='){throw 'legacy browser flag remains'}
-          if($final -notmatch '(?m)^SISCOTIC_AUTO_ENABLED=true$'){throw 'auto provider not enabled'}
-          if($final -notmatch '(?m)^SISCOTIC_CURL_FALLBACK_ENABLED=true$'){throw 'curl fallback not enabled'}
-          if($final -notmatch '(?m)^DIRECT_REQUEST_TIMEOUT_SECONDS=20$'){throw 'timeout not migrated'}
-          if($final -notmatch '(?m)^PROVIDER_PARALLEL_TIMEOUT_SECONDS=22$'){throw 'parallel timeout not migrated'}
-          if($final -notmatch '(?m)^DIRECT_API_KEY=KEEP_ME$'){throw 'user credential lost'}
+          if($final -notmatch '(?m)^SISCOTIC_AUTO_ENABLED=true\r?$'){throw 'auto provider not enabled'}
+          if($final -notmatch '(?m)^SISCOTIC_CURL_FALLBACK_ENABLED=true\r?$'){throw 'curl fallback not enabled'}
+          if($final -notmatch '(?m)^DIRECT_REQUEST_TIMEOUT_SECONDS=20\r?$'){throw 'timeout not migrated'}
+          if($final -notmatch '(?m)^PROVIDER_PARALLEL_TIMEOUT_SECONDS=22\r?$'){throw 'parallel timeout not migrated'}
+          if($final -notmatch '(?m)^DIRECT_API_KEY=KEEP_ME\r?$'){throw 'user credential lost'}
           Write-Host 'ENV_MIGRATION_V156_OK'
       - name: Test exact user CDC with Windows requests and curl
         shell: pwsh
