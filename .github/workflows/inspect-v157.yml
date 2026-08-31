@@ -1,0 +1,34 @@
+name: Inspect v1.5.7 package
+
+on:
+  push:
+    branches:
+      - diagnostic/siscotic-live-20260826
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download v1.5.7 update package
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/luxomarket/consulta-cdc-contable-updates/releases/download/v1.5.7/Consulta_CDC_Contable_v1.5.7_UPDATE.zip'
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\v157.zip"
+          Expand-Archive "$env:RUNNER_TEMP\v157.zip" "$env:RUNNER_TEMP\v157" -Force
+          Write-Host '=== FILES ==='
+          Get-ChildItem "$env:RUNNER_TEMP\v157" -Recurse -File | ForEach-Object { $_.FullName.Substring("$env:RUNNER_TEMP\v157".Length + 1) }
+      - name: Locate browser launch logic
+        shell: pwsh
+        run: |
+          Write-Host '=== MATCHES ==='
+          Get-ChildItem "$env:RUNNER_TEMP\v157" -Recurse -File -Include *.py | Select-String -Pattern 'El navegador local se cerró antes de iniciar el canal de consulta|remote-debugging-port|connect_over_cdp|Popen.poll|proc.poll' -Context 12,25 | ForEach-Object { $_.ToString() }
+      - name: Upload expanded package
+        uses: actions/upload-artifact@v4
+        with:
+          name: v157-expanded
+          path: ${{ runner.temp }}/v157
+          retention-days: 1
