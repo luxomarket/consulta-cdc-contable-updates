@@ -13,32 +13,40 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Query known CDCs without credentials
         shell: pwsh
         run: |
-          $cases = @(
-            '01800228774735001003321522026080112808168839',
-            '05800018125001004001467712025050917914375148',
-            '01800268520001001000000422024082310845861483',
-            '01800774060069002030118622026080214930621220',
-            '01800005198001003858591122026081512010621690',
-            '01800269594001011016306422026082615469396417',
-            '01801219302001001000166822026081712457243447'
-          )
-          $ok = 0
-          foreach ($cdc in $cases) {
-            $url = "https://api.expert360.com.py/api/compra?cdc=$cdc&agrupar=false"
-            try {
-              $r = Invoke-WebRequest -Uri $url -Headers @{Accept='application/json'; Referer='https://expert360.com.py/'} -TimeoutSec 25
-              $j = $r.Content | ConvertFrom-Json
-              $items = @($j.egreDet).Count
-              Write-Host ('CASE {0} HTTP={1} DOC={2} RUC={3} PROV={4} TOTAL={5} G10={6} I10={7} G5={8} I5={9} EXE={10} ITEMS={11} ERR={12}' -f $cdc,$r.StatusCode,$j.egrecmpnro,$j.prvRuc,$j.prvNom,$j.egretotal,$j.gra10,$j.iva10,$j.gra5,$j.iva5,$j.exenta,$items,$j.msgError)
-              if ($r.StatusCode -eq 200 -and $j.egrecmpnro -and $j.prvRuc -and $j.egretotal -ne $null) { $ok++ }
-            } catch {
-              $status = ''
-              try { $status = [int]$_.Exception.Response.StatusCode } catch {}
-              Write-Host "CASE $cdc ERROR status=$status message=$($_.Exception.Message)"
-            }
-          }
-          Write-Host "EXPERT360_RESULT=$ok/$($cases.Count)"
-          if ($ok -lt 5) { exit 2 }
+          @'
+          import json, urllib.request, urllib.error
+          cases = [
+              '01800228774735001003321522026080112808168839',
+              '05800018125001004001467712025050917914375148',
+              '01800268520001001000000422024082310845861483',
+              '01800774060069002030118622026080214930621220',
+              '01800005198001003858591122026081512010621690',
+              '01800269594001011016306422026082615469396417',
+              '01801219302001001000166822026081712457243447',
+          ]
+          ok = 0
+          for cdc in cases:
+              url=f'https://api.expert360.com.py/api/compra?cdc={cdc}&agrupar=false'
+              req=urllib.request.Request(url, headers={'Accept':'application/json','Referer':'https://expert360.com.py/','User-Agent':'Mozilla/5.0'})
+              try:
+                  with urllib.request.urlopen(req, timeout=25) as r:
+                      raw=r.read().decode('utf-8','replace')
+                      status=r.status
+                  j=json.loads(raw)
+                  items=j.get('egreDet') or []
+                  print('CASE',cdc,'HTTP=',status,'DOC=',j.get('egrecmpnro'),'RUC=',j.get('prvRuc'),'PROV=',j.get('prvNom'),'TOTAL=',j.get('egretotal'),'G10=',j.get('gra10'),'I10=',j.get('iva10'),'G5=',j.get('gra5'),'I5=',j.get('iva5'),'EXE=',j.get('exenta'),'ITEMS=',len(items),'ERR=',j.get('msgError'))
+                  if status==200 and j.get('egrecmpnro') and j.get('prvRuc') and j.get('egretotal') is not None:
+                      ok += 1
+              except Exception as e:
+                  print('CASE',cdc,'ERROR',repr(e))
+          print(f'EXPERT360_RESULT={ok}/{len(cases)}')
+          if ok < 5:
+              raise SystemExit(2)
+          '@ | Set-Content "$env:RUNNER_TEMP\probe_expert.py" -Encoding UTF8
+          python "$env:RUNNER_TEMP\probe_expert.py"
