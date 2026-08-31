@@ -1,4 +1,4 @@
-name: Inspect v1.5.7 package
+name: Inspect and validate v1.5.8 patch
 
 on:
   push:
@@ -9,26 +9,63 @@ permissions:
   contents: read
 
 jobs:
-  inspect:
+  patched-five-real:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 18
     steps:
-      - name: Download v1.5.7 update package
-        shell: pwsh
-        run: |
-          $url = 'https://github.com/luxomarket/consulta-cdc-contable-updates/releases/download/v1.5.7/Consulta_CDC_Contable_v1.5.7_UPDATE.zip'
-          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\v157.zip"
-          Expand-Archive "$env:RUNNER_TEMP\v157.zip" "$env:RUNNER_TEMP\v157" -Force
-          Write-Host '=== FILES ==='
-          Get-ChildItem "$env:RUNNER_TEMP\v157" -Recurse -File | ForEach-Object { $_.FullName.Substring("$env:RUNNER_TEMP\v157".Length + 1) }
-      - name: Locate browser launch logic
-        shell: pwsh
-        run: |
-          Write-Host '=== MATCHES ==='
-          Get-ChildItem "$env:RUNNER_TEMP\v157" -Recurse -File -Include *.py | Select-String -Pattern 'El navegador local se cerró antes de iniciar el canal de consulta|remote-debugging-port|connect_over_cdp|Popen.poll|proc.poll' -Context 12,25 | ForEach-Object { $_.ToString() }
-      - name: Upload expanded package
-        uses: actions/upload-artifact@v4
+      - uses: actions/setup-python@v5
         with:
-          name: v157-expanded
-          path: ${{ runner.temp }}/v157
-          retention-days: 1
+          python-version: '3.12'
+      - name: Download v1.5.7 and apply critical v1.5.8 CDP correction
+        shell: pwsh
+        run: |
+          $url='https://github.com/luxomarket/consulta-cdc-contable-updates/releases/download/v1.5.7/Consulta_CDC_Contable_v1.5.7_UPDATE.zip'
+          Invoke-WebRequest $url -OutFile "$env:RUNNER_TEMP\pkg.zip"
+          Expand-Archive "$env:RUNNER_TEMP\pkg.zip" "$env:RUNNER_TEMP\pkg" -Force
+          $p="$env:RUNNER_TEMP\pkg\app\services\direct_provider.py"
+          $s=Get-Content $p -Raw -Encoding UTF8
+          $old=@'
+        deadline = time.monotonic() + min(max(self.timeout, 4.0), 10.0)
+        last = None
+        while time.monotonic() < deadline:
+            if self._browser_process.poll() is not None:
+                raise ProviderNotConfigured("El navegador local se cerró antes de iniciar el canal de consulta")
+            try:
+'@
+          $new=@'
+        deadline = time.monotonic() + min(max(self.timeout, 12.0), 20.0)
+        last = None
+        launcher_exit = None
+        while time.monotonic() < deadline:
+            try:
+                if self._browser_process.poll() is not None:
+                    launcher_exit = self._browser_process.returncode
+            except Exception:
+                pass
+            try:
+'@
+          if (-not $s.Contains($old)) { throw 'No se encontró el bloque v1.5.7 a corregir' }
+          Set-Content $p ($s.Replace($old,$new)) -Encoding UTF8
+          (Get-Content "$env:RUNNER_TEMP\pkg\app\config.py" -Raw).Replace('app_version: str = "1.5.7"','app_version: str = "1.5.8"') | Set-Content "$env:RUNNER_TEMP\pkg\app\config.py" -Encoding UTF8
+          '1.5.8' | Set-Content "$env:RUNNER_TEMP\pkg\VERSION.txt" -Encoding ASCII
+      - name: Install dependencies
+        shell: pwsh
+        working-directory: ${{ runner.temp }}/pkg
+        run: pip install -r requirements.txt
+      - name: Wait for SisCoTic DNS
+        shell: pwsh
+        run: |
+          $ok=$false
+          1..8 | ForEach-Object {
+            try { Resolve-DnsName cdc.siscotic.com.py -ErrorAction Stop | Out-Host; $ok=$true; break }
+            catch { Write-Host "DNS intento $_ falló"; Start-Sleep -Seconds 5 }
+          }
+          if (-not $ok) { throw 'DNS del proveedor no disponible desde el runner' }
+      - name: Query five real CDCs through patched application
+        shell: pwsh
+        working-directory: ${{ runner.temp }}/pkg
+        env:
+          SISCOTIC_BROWSER_PRIMARY_ENABLED: 'true'
+          SISCOTIC_BROWSER_FALLBACK_ENABLED: 'true'
+          SISCOTIC_HTTP_DIRECT_ENABLED: 'true'
+        run: python tools/test_multifuente_5_real.py
