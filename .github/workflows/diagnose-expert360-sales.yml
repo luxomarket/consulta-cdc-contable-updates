@@ -1,0 +1,66 @@
+name: Diagnose Expert360 sales CDC
+
+on:
+  push:
+    branches:
+      - diagnostic/siscotic-live-20260826
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose-sales:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Probe Expert360 candidate endpoints and field presence
+        shell: pwsh
+        run: |
+          @'
+          import json, urllib.parse, urllib.request
+          CDC='01801675510001001000149122026082111651688007'
+          BASE='https://api.expert360.com.py'
+          endpoints=['/api/compra','/api/venta','/api/ventas','/api/ingreso','/api/consulta','/api/cdc']
+          headers={'Accept':'application/json','Referer':'https://expert360.com.py/','User-Agent':'Mozilla/5.0'}
+          wanted=('cliente','receptor','ruc','nom','nombre','razon','doc','ced','ci','dRucRec','dNomRec','dNumIDRec','cliruc','clinom','cliruc','clinom','ingr','venta')
+          for ep in endpoints:
+              qs=urllib.parse.urlencode({'cdc':CDC,'agrupar':'false'})
+              url=BASE+ep+'?'+qs
+              try:
+                  req=urllib.request.Request(url,headers=headers)
+                  with urllib.request.urlopen(req,timeout=25) as r:
+                      status=r.status; raw=r.read().decode('utf-8','replace')
+                  print('\nENDPOINT',ep,'STATUS',status,'CT',r.headers.get('content-type'))
+                  try:
+                      obj=json.loads(raw)
+                  except Exception:
+                      print('JSON=False prefix=',raw[:80].replace('\n',' ')); continue
+                  print('JSON=True TYPE',type(obj).__name__)
+                  if isinstance(obj,dict):
+                      keys=sorted(map(str,obj.keys()))
+                      print('TOP_KEYS',keys)
+                      hits=[k for k in keys if any(t.lower() in k.lower() for t in wanted)]
+                      print('RECIPIENT_LIKE_KEYS',hits)
+                      for k,v in obj.items():
+                          if isinstance(v,dict):
+                              ks=sorted(map(str,v.keys()))
+                              hh=[x for x in ks if any(t.lower() in x.lower() for t in wanted)]
+                              if hh: print('NESTED',k,'RECIPIENT_LIKE_KEYS',hh)
+                          elif isinstance(v,list) and v and isinstance(v[0],dict):
+                              ks=sorted(map(str,v[0].keys()))
+                              hh=[x for x in ks if any(t.lower() in x.lower() for t in wanted)]
+                              if hh: print('LIST',k,'RECIPIENT_LIKE_KEYS',hh)
+                      qr=obj.get('dcarQR') or obj.get('dCarQR') or ''
+                      if qr:
+                          q=urllib.parse.parse_qs(urllib.parse.urlparse(str(qr).replace('&amp;','&')).query)
+                          print('QR_KEYS',sorted(q.keys()))
+                  elif isinstance(obj,list):
+                      print('LIST_LEN',len(obj))
+                      if obj and isinstance(obj[0],dict): print('FIRST_KEYS',sorted(obj[0].keys()))
+              except Exception as e:
+                  print('\nENDPOINT',ep,'ERROR',type(e).__name__,str(e)[:180])
+          '@ | Set-Content $env:RUNNER_TEMP\probe.py -Encoding utf8
+          python $env:RUNNER_TEMP\probe.py
