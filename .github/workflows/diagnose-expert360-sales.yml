@@ -16,51 +16,43 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Probe Expert360 candidate endpoints and field presence
+      - name: Verify venta enrichment without exposing customer values
         shell: pwsh
         run: |
           @'
           import json, urllib.parse, urllib.request
-          CDC='01801675510001001000149122026082111651688007'
           BASE='https://api.expert360.com.py'
-          endpoints=['/api/compra','/api/venta','/api/ventas','/api/ingreso','/api/consulta','/api/cdc']
-          headers={'Accept':'application/json','Referer':'https://expert360.com.py/','User-Agent':'Mozilla/5.0'}
-          wanted=('cliente','receptor','ruc','nom','nombre','razon','doc','ced','ci','dRucRec','dNomRec','dNumIDRec','cliruc','clinom','cliruc','clinom','ingr','venta')
-          for ep in endpoints:
-              qs=urllib.parse.urlencode({'cdc':CDC,'agrupar':'false'})
-              url=BASE+ep+'?'+qs
-              try:
-                  req=urllib.request.Request(url,headers=headers)
-                  with urllib.request.urlopen(req,timeout=25) as r:
-                      status=r.status; raw=r.read().decode('utf-8','replace')
-                  print('\nENDPOINT',ep,'STATUS',status,'CT',r.headers.get('content-type'))
-                  try:
-                      obj=json.loads(raw)
-                  except Exception:
-                      print('JSON=False prefix=',raw[:80].replace('\n',' ')); continue
-                  print('JSON=True TYPE',type(obj).__name__)
-                  if isinstance(obj,dict):
-                      keys=sorted(map(str,obj.keys()))
-                      print('TOP_KEYS',keys)
-                      hits=[k for k in keys if any(t.lower() in k.lower() for t in wanted)]
-                      print('RECIPIENT_LIKE_KEYS',hits)
-                      for k,v in obj.items():
-                          if isinstance(v,dict):
-                              ks=sorted(map(str,v.keys()))
-                              hh=[x for x in ks if any(t.lower() in x.lower() for t in wanted)]
-                              if hh: print('NESTED',k,'RECIPIENT_LIKE_KEYS',hh)
-                          elif isinstance(v,list) and v and isinstance(v[0],dict):
-                              ks=sorted(map(str,v[0].keys()))
-                              hh=[x for x in ks if any(t.lower() in x.lower() for t in wanted)]
-                              if hh: print('LIST',k,'RECIPIENT_LIKE_KEYS',hh)
-                      qr=obj.get('dcarQR') or obj.get('dCarQR') or ''
-                      if qr:
-                          q=urllib.parse.parse_qs(urllib.parse.urlparse(str(qr).replace('&amp;','&')).query)
-                          print('QR_KEYS',sorted(q.keys()))
-                  elif isinstance(obj,list):
-                      print('LIST_LEN',len(obj))
-                      if obj and isinstance(obj[0],dict): print('FIRST_KEYS',sorted(obj[0].keys()))
-              except Exception as e:
-                  print('\nENDPOINT',ep,'ERROR',type(e).__name__,str(e)[:180])
+          CASES=[
+            ('sales_missing_recipient','01801675510001001000149122026082111651688007'),
+            ('known_purchase_case','01800269594001011016306422026082615469396417'),
+          ]
+          H={'Accept':'application/json','Referer':'https://expert360.com.py/','User-Agent':'Mozilla/5.0'}
+          def get(ep,cdc):
+            qs=urllib.parse.urlencode({'cdc':cdc,'agrupar':'false'})
+            req=urllib.request.Request(BASE+ep+'?'+qs,headers=H)
+            with urllib.request.urlopen(req,timeout=25) as r:
+              return r.status,json.loads(r.read().decode('utf-8','replace'))
+          for label,cdc in CASES:
+            print('\nCASE',label)
+            try:
+              sc,c=get('/api/compra',cdc)
+              qr=c.get('dcarQR') or c.get('dCarQR') or ''
+              q=urllib.parse.parse_qs(urllib.parse.urlparse(str(qr).replace('&amp;','&')).query)
+              qr_ruc=(q.get('dRucRec') or [''])[0]
+              qr_doc=(q.get('dNumIDRec') or [''])[0]
+              print('COMPRA_STATUS',sc,'QR_HAS_RUC',bool(qr_ruc),'QR_HAS_DOC',bool(qr_doc))
+            except Exception as e:
+              print('COMPRA_ERROR',type(e).__name__); qr_ruc=''; qr_doc=''
+            try:
+              sv,v=get('/api/venta',cdc)
+              sale_id=str(v.get('ingruc') or '').strip()
+              name=str(v.get('clinom') or '').strip()
+              print('VENTA_STATUS',sv,'HAS_CLINOM',bool(name),'HAS_INGRUC',bool(sale_id),'HAS_INGDET',bool(v.get('ingDet')))
+              normalized=sale_id.replace('-','').strip()
+              print('SALE_ID_MATCHES_QR_RUC',bool(qr_ruc and normalized.startswith(qr_ruc.replace('-',''))))
+              print('SALE_ID_MATCHES_QR_DOC',bool(qr_doc and normalized==qr_doc.replace('-','')))
+              print('VENTA_DOCUMENT_FIELDS',all(bool(v.get(k)) for k in ('ingcmpnro','ingcomprobante','ingtimbrado','ingfec')))
+            except Exception as e:
+              print('VENTA_ERROR',type(e).__name__,str(e)[:80])
           '@ | Set-Content $env:RUNNER_TEMP\probe.py -Encoding utf8
           python $env:RUNNER_TEMP\probe.py
