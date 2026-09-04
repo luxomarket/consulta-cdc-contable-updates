@@ -1,4 +1,4 @@
-name: Diagnose Expert360 linked document
+name: Diagnose Expert360 public endpoints
 
 on:
   push:
@@ -16,42 +16,38 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Inspect linked-document fields for NC
+      - name: Scan public JS for API endpoint names
         shell: pwsh
         run: |
           @'
-          import json, urllib.parse, urllib.request
-          BASE='https://api.expert360.com.py'
-          CDC='05801146216001001000193122026083111093297972'
-          H={'Accept':'application/json','Referer':'https://expert360.com.py/','User-Agent':'Mozilla/5.0'}
-          def get(ep):
-            qs=urllib.parse.urlencode({'cdc':CDC,'agrupar':'false'})
-            req=urllib.request.Request(BASE+ep+'?'+qs,headers=H)
-            with urllib.request.urlopen(req,timeout=25) as r:
-              return r.status,json.loads(r.read().decode('utf-8','replace'))
-          for ep in ('/api/compra','/api/venta'):
-            print('\nENDPOINT',ep)
+          import re, urllib.parse, urllib.request
+          bases=['https://expert360.com.py/','https://api.expert360.com.py/']
+          H={'User-Agent':'Mozilla/5.0','Accept':'text/html,application/javascript,*/*'}
+          seen=set()
+          for base in bases:
             try:
-              status,p=get(ep)
-              print('STATUS',status)
-              for k in sorted(p):
-                kl=k.lower()
-                if any(x in kl for x in ('vincu','asoc','relac','ref','fec','fecha','tim','cmpnro','comprobante','cdc')):
-                  v=p.get(k)
-                  if isinstance(v,(str,int,float,bool)) or v is None:
-                    print(k,'=',repr(v))
-              for list_key in ('egreDet','ingDet'):
-                rows=p.get(list_key) or []
-                if isinstance(rows,list):
-                  for i,row in enumerate(rows[:5]):
-                    if isinstance(row,dict):
-                      for k in sorted(row):
-                        kl=k.lower()
-                        if any(x in kl for x in ('vincu','asoc','relac','ref','fec','fecha','tim','cmpnro','comprobante','cdc')):
-                          v=row.get(k)
-                          if isinstance(v,(str,int,float,bool)) or v is None:
-                            print(f'{list_key}[{i}].{k}=',repr(v))
+              req=urllib.request.Request(base,headers=H)
+              with urllib.request.urlopen(req,timeout=25) as r:
+                text=r.read().decode('utf-8','replace')
+                final=r.geturl()
+              print('BASE',base,'FINAL',final,'LEN',len(text))
+              scripts=re.findall(r'<script[^>]+src=["\']([^"\']+)',text,re.I)
+              for src in scripts[:50]:
+                u=urllib.parse.urljoin(final,src)
+                if u in seen: continue
+                seen.add(u)
+                try:
+                  req=urllib.request.Request(u,headers=H)
+                  with urllib.request.urlopen(req,timeout=25) as rr:
+                    js=rr.read().decode('utf-8','replace')
+                  hits=sorted(set(re.findall(r'["\']([^"\']*/api/[^"\']+)["\']',js)))
+                  filt=[h for h in hits if any(x in h.lower() for x in ('compra','venta','xml','cdc','document','dte','factura','nota'))]
+                  if filt:
+                    print('SCRIPT',u)
+                    for h in filt[:80]: print(' API',h[:220])
+                except Exception as e:
+                  pass
             except Exception as e:
-              print('ERROR',type(e).__name__,str(e)[:200])
-          '@ | Set-Content $env:RUNNER_TEMP\probe.py -Encoding utf8
-          python $env:RUNNER_TEMP\probe.py
+              print('BASE_ERROR',base,type(e).__name__,str(e)[:120])
+          '@ | Set-Content $env:RUNNER_TEMP\scan.py -Encoding utf8
+          python $env:RUNNER_TEMP\scan.py
