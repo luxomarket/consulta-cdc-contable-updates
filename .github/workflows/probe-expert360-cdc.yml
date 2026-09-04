@@ -1,0 +1,56 @@
+name: Probe Expert360 CDC endpoint
+
+on:
+  push:
+    branches:
+      - diagnostic/siscotic-live-20260826
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Query ten real CDCs without credentials
+        shell: pwsh
+        run: |
+          @'
+          import json, urllib.request
+          from urllib.parse import urlparse, parse_qs
+          cases = [
+              '01800228774735001003321522026080112808168839',
+              '05800018125001004001467712025050917914375148',
+              '01800268520001001000000422024082310845861483',
+              '01800774060069002030118622026080214930621220',
+              '01800005198001003858591122026081512010621690',
+              '01800269594001011016306422026082615469396417',
+              '01801219302001001000166822026081712457243447',
+              '01800140664045005028736522026080310859704441',
+              '01800032969008007005097122026080715911140787',
+              '01801021383001001000477022026061515772623429',
+          ]
+          ok = 0
+          for cdc in cases:
+              url=f'https://api.expert360.com.py/api/compra?cdc={cdc}&agrupar=false'
+              req=urllib.request.Request(url, headers={'Accept':'application/json','Referer':'https://expert360.com.py/','User-Agent':'Mozilla/5.0'})
+              try:
+                  with urllib.request.urlopen(req, timeout=25) as r:
+                      raw=r.read().decode('utf-8','replace'); status=r.status
+                  j=json.loads(raw); items=j.get('egreDet') or []
+                  qr=str(j.get('dcarQR') or j.get('dCarQR') or '').replace('&amp;','&')
+                  qp={k:v[0] for k,v in parse_qs(urlparse(qr).query).items() if v}
+                  same=(not qp.get('Id')) or qp.get('Id')==cdc
+                  print('CASE',cdc,'HTTP=',status,'TYPE=',j.get('egrecomprobante'),'DOC=',j.get('egrecmpnro'),'RUC=',j.get('prvRuc'),'PROV=',j.get('prvNom'),'EXPERT_TOTAL=',j.get('egretotal'),'QR_TOTAL=',qp.get('dTotGralOpe'),'QR_IVA=',qp.get('dTotIVA'),'ITEMS=',len(items),'QR_CDC_OK=',same,'ERR=',j.get('msgError'))
+                  if status==200 and j.get('egrecmpnro') and j.get('prvRuc') and j.get('egretotal') is not None and same:
+                      ok += 1
+              except Exception as e:
+                  print('CASE',cdc,'ERROR',repr(e))
+          print(f'EXPERT360_RESULT={ok}/{len(cases)}')
+          if ok != len(cases): raise SystemExit(2)
+          '@ | Set-Content "$env:RUNNER_TEMP\probe_expert.py" -Encoding UTF8
+          python "$env:RUNNER_TEMP\probe_expert.py"

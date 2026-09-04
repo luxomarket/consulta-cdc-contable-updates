@@ -1,0 +1,112 @@
+name: Live v1.5.8 invisible browser + DoH
+
+on:
+  push:
+    branches:
+      - diagnostic/siscotic-live-20260826
+
+permissions:
+  contents: read
+
+jobs:
+  headless-doh-five:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install 'playwright>=1.50,<2'
+      - name: Query five real CDCs invisibly with DNS-over-HTTPS fallback
+        shell: pwsh
+        run: |
+          @'
+          import json, os, re, socket, subprocess, tempfile, time, urllib.request, ipaddress
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+
+          HOME='https://cdc.siscotic.com.py/'
+          HOST='cdc.siscotic.com.py'
+          CASES=[
+            '01800228774735001003321522026080112808168839',
+            '05800018125001004001467712025050917914375148',
+            '01800268520001001000000422024082310845861483',
+            '01800774060069002030118622026080214930621220',
+            '01800005198001003858591122026081512010621690',
+          ]
+
+          def resolve_doh(host):
+              urls=[
+                f'https://dns.google/resolve?name={host}&type=A',
+                f'https://cloudflare-dns.com/dns-query?name={host}&type=A',
+              ]
+              for url in urls:
+                  try:
+                      req=urllib.request.Request(url,headers={'Accept':'application/dns-json','User-Agent':'Mozilla/5.0'})
+                      with urllib.request.urlopen(req,timeout=10) as r:
+                          data=json.loads(r.read().decode())
+                      for ans in data.get('Answer') or []:
+                          if int(ans.get('type',0))==1:
+                              ip=str(ipaddress.ip_address(ans.get('data')))
+                              print('DOH_RESOLVED',host,ip,url)
+                              return ip
+                  except Exception as e:
+                      print('DOH_FAIL',url,repr(e))
+              raise RuntimeError('No DoH A record')
+
+          try:
+              normal=socket.gethostbyname(HOST)
+              print('SYSTEM_DNS',normal)
+              ip=normal
+          except Exception as e:
+              print('SYSTEM_DNS_FAIL',repr(e))
+              ip=resolve_doh(HOST)
+
+          profile=Path(tempfile.mkdtemp(prefix='cdc-invisible-'))
+          candidates=[
+            Path(os.environ.get('PROGRAMFILES(X86)',''))/'Microsoft'/'Edge'/'Application'/'msedge.exe',
+            Path(os.environ.get('PROGRAMFILES',''))/'Microsoft'/'Edge'/'Application'/'msedge.exe',
+            Path(os.environ.get('PROGRAMFILES',''))/'Google'/'Chrome'/'Application'/'chrome.exe',
+          ]
+          exe=next((p for p in candidates if p.is_file()),None); assert exe, 'No browser'
+          with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as s:
+              s.bind(('127.0.0.1',0)); port=s.getsockname()[1]
+          args=[
+            str(exe),f'--remote-debugging-port={port}',f'--user-data-dir={profile}',
+            '--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check',
+            '--disable-sync','--no-service-autorun','--disable-background-networking','--disable-component-update',
+            '--disable-features=Translate,MediaRouter,msEdgeSync',
+            f'--host-resolver-rules=MAP {HOST} {ip},EXCLUDE localhost',
+            'about:blank'
+          ]
+          proc=subprocess.Popen(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL,
+                                creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)|getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0))
+          ep=f'http://127.0.0.1:{port}/json/version'; deadline=time.monotonic()+20
+          while time.monotonic()<deadline:
+              try:
+                  with urllib.request.urlopen(ep,timeout=.5) as r:
+                      if json.loads(r.read().decode()).get('webSocketDebuggerUrl'): break
+              except Exception: pass
+              time.sleep(.1)
+          else: raise AssertionError('CDP timeout')
+
+          pw=sync_playwright().start(); browser=pw.chromium.connect_over_cdp(f'http://127.0.0.1:{port}',timeout=20000)
+          context=browser.contexts[0]; page=context.pages[0]; page.set_default_timeout(30000); page.set_default_navigation_timeout(30000)
+          page.goto(HOME,wait_until='domcontentloaded',timeout=30000)
+          field=page.locator('#searchInput'); field.wait_for(state='visible',timeout=30000)
+          ok=0
+          for cdc in CASES:
+              field.fill(cdc); t=time.monotonic()
+              with page.expect_response(lambda r:'/api/consultar' in r.url,timeout=30000) as info:
+                  page.get_by_role('button',name=re.compile(r'^\s*Consultar\s*$',re.I)).first.click()
+              resp=info.value; payload=json.loads(resp.text()); d=payload.get('data') or {}
+              found=resp.status==200 and payload.get('success') is True and d.get('emisor',{}).get('ruc') and d.get('timbrado',{}).get('numero_documento') and d.get('liquidaciones_iva',{}).get('total_general') is not None
+              print('CASE',cdc,resp.status,round(time.monotonic()-t,3),d.get('emisor',{}).get('razon_social'),d.get('timbrado',{}).get('numero_documento'),d.get('liquidaciones_iva',{}).get('total_general'))
+              assert found
+              ok+=1
+              page.wait_for_timeout(200)
+          assert ok==5
+          print('INVISIBLE_DOH_5_OF_5_OK')
+          browser.close(); pw.stop()
+          '@ | Set-Content $env:RUNNER_TEMP\headless_doh.py -Encoding utf8
+          python $env:RUNNER_TEMP\headless_doh.py
