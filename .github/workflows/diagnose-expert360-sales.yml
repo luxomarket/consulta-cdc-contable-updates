@@ -1,4 +1,4 @@
-name: Diagnose linked document from official QR
+name: Diagnose hidden linked-document fields
 
 on:
   push:
@@ -16,33 +16,39 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Fetch Expert QR and inspect official response for association data
+      - name: Inspect all scalar fields for document/date patterns
         shell: pwsh
         run: |
           @'
           import json, re, urllib.parse, urllib.request
           CDC='05801146216001001000193122026083111093297972'
-          H={'Accept':'application/json,text/html,*/*','Referer':'https://expert360.com.py/','User-Agent':'Mozilla/5.0'}
-          api='https://api.expert360.com.py/api/compra?'+urllib.parse.urlencode({'cdc':CDC,'agrupar':'false'})
-          req=urllib.request.Request(api,headers=H)
-          with urllib.request.urlopen(req,timeout=25) as r:
-            data=json.loads(r.read().decode('utf-8','replace'))
-          qr=str(data.get('dcarQR') or data.get('dCarQR') or '').replace('&amp;','&')
-          print('QR_PRESENT',bool(qr),'QR_HOST',urllib.parse.urlparse(qr).netloc,'QR_PATH',urllib.parse.urlparse(qr).path)
-          if not qr: raise SystemExit(2)
-          req=urllib.request.Request(qr,headers={'User-Agent':'Mozilla/5.0','Accept':'text/html,application/json,*/*'})
-          with urllib.request.urlopen(req,timeout=30) as r:
-            body=r.read().decode('utf-8','replace'); ct=r.headers.get('content-type'); final=r.geturl()
-          print('OFFICIAL_STATUS',r.status,'CT',ct,'LEN',len(body),'FINAL_HOST',urllib.parse.urlparse(final).netloc)
-          low=body.lower()
-          for token in ('documento asociado','factura relacionada','dcdcde','dcdcdeRef'.lower(),'gcamdeasoc','documento relacionado','referenciado'):
-            print('HAS',token,token in low)
-          text=re.sub(r'<script.*?</script>',' ',body,flags=re.I|re.S)
-          text=re.sub(r'<style.*?</style>',' ',text,flags=re.I|re.S)
-          text=re.sub(r'<[^>]+>',' ',text)
-          text=re.sub(r'\s+',' ',text)
-          for term in ('asociado','relacionado','referenciado','factura'):
-            m=re.search(r'.{0,120}'+term+r'.{0,220}',text,re.I)
-            if m: print('TEXT_MATCH',term,m.group(0)[:360])
+          BASE='https://api.expert360.com.py'
+          H={'Accept':'application/json','Referer':'https://expert360.com.py/','User-Agent':'Mozilla/5.0'}
+          current_doc='001-001-0001931'
+          current_date='2026-08-31'
+          def walk(x,path='root'):
+            if isinstance(x,dict):
+              for k,v in x.items(): yield from walk(v,path+'.'+str(k))
+            elif isinstance(x,list):
+              for i,v in enumerate(x): yield from walk(v,f'{path}[{i}]')
+            else:
+              yield path,x
+          for ep in ('/api/compra','/api/venta'):
+            u=BASE+ep+'?'+urllib.parse.urlencode({'cdc':CDC,'agrupar':'false'})
+            req=urllib.request.Request(u,headers=H)
+            with urllib.request.urlopen(req,timeout=25) as r:
+              obj=json.loads(r.read().decode('utf-8','replace'))
+            print('\nENDPOINT',ep,'STATUS',r.status)
+            for path,val in walk(obj):
+              s='' if val is None else str(val).strip()
+              if not s: continue
+              docs=re.findall(r'\b\d{3}-\d{3}-\d{7}\b',s)
+              dates=re.findall(r'\b20\d{2}-\d{2}-\d{2}\b',s)
+              cdcs=re.findall(r'\b\d{44}\b',s)
+              docs=[d for d in docs if d!=current_doc]
+              dates=[d for d in dates if d!=current_date]
+              cdcs=[c for c in cdcs if c!=CDC]
+              if docs or dates or cdcs:
+                print('MATCH',path,'DOCS',docs,'DATES',dates,'CDCS',cdcs)
           '@ | Set-Content $env:RUNNER_TEMP\probe.py -Encoding utf8
           python $env:RUNNER_TEMP\probe.py
