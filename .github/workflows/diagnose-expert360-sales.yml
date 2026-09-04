@@ -1,4 +1,4 @@
-name: Diagnose Expert360 sales CDC
+name: Diagnose Expert360 linked document
 
 on:
   push:
@@ -16,43 +16,42 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Verify venta enrichment without exposing customer values
+      - name: Inspect linked-document fields for NC
         shell: pwsh
         run: |
           @'
           import json, urllib.parse, urllib.request
           BASE='https://api.expert360.com.py'
-          CASES=[
-            ('sales_missing_recipient','01801675510001001000149122026082111651688007'),
-            ('known_purchase_case','01800269594001011016306422026082615469396417'),
-          ]
+          CDC='05801146216001001000193122026083111093297972'
           H={'Accept':'application/json','Referer':'https://expert360.com.py/','User-Agent':'Mozilla/5.0'}
-          def get(ep,cdc):
-            qs=urllib.parse.urlencode({'cdc':cdc,'agrupar':'false'})
+          def get(ep):
+            qs=urllib.parse.urlencode({'cdc':CDC,'agrupar':'false'})
             req=urllib.request.Request(BASE+ep+'?'+qs,headers=H)
             with urllib.request.urlopen(req,timeout=25) as r:
               return r.status,json.loads(r.read().decode('utf-8','replace'))
-          for label,cdc in CASES:
-            print('\nCASE',label)
+          for ep in ('/api/compra','/api/venta'):
+            print('\nENDPOINT',ep)
             try:
-              sc,c=get('/api/compra',cdc)
-              qr=c.get('dcarQR') or c.get('dCarQR') or ''
-              q=urllib.parse.parse_qs(urllib.parse.urlparse(str(qr).replace('&amp;','&')).query)
-              qr_ruc=(q.get('dRucRec') or [''])[0]
-              qr_doc=(q.get('dNumIDRec') or [''])[0]
-              print('COMPRA_STATUS',sc,'QR_HAS_RUC',bool(qr_ruc),'QR_HAS_DOC',bool(qr_doc))
+              status,p=get(ep)
+              print('STATUS',status)
+              for k in sorted(p):
+                kl=k.lower()
+                if any(x in kl for x in ('vincu','asoc','relac','ref','fec','fecha','tim','cmpnro','comprobante','cdc')):
+                  v=p.get(k)
+                  if isinstance(v,(str,int,float,bool)) or v is None:
+                    print(k,'=',repr(v))
+              for list_key in ('egreDet','ingDet'):
+                rows=p.get(list_key) or []
+                if isinstance(rows,list):
+                  for i,row in enumerate(rows[:5]):
+                    if isinstance(row,dict):
+                      for k in sorted(row):
+                        kl=k.lower()
+                        if any(x in kl for x in ('vincu','asoc','relac','ref','fec','fecha','tim','cmpnro','comprobante','cdc')):
+                          v=row.get(k)
+                          if isinstance(v,(str,int,float,bool)) or v is None:
+                            print(f'{list_key}[{i}].{k}=',repr(v))
             except Exception as e:
-              print('COMPRA_ERROR',type(e).__name__); qr_ruc=''; qr_doc=''
-            try:
-              sv,v=get('/api/venta',cdc)
-              sale_id=str(v.get('ingruc') or '').strip()
-              name=str(v.get('clinom') or '').strip()
-              print('VENTA_STATUS',sv,'HAS_CLINOM',bool(name),'HAS_INGRUC',bool(sale_id),'HAS_INGDET',bool(v.get('ingDet')))
-              normalized=sale_id.replace('-','').strip()
-              print('SALE_ID_MATCHES_QR_RUC',bool(qr_ruc and normalized.startswith(qr_ruc.replace('-',''))))
-              print('SALE_ID_MATCHES_QR_DOC',bool(qr_doc and normalized==qr_doc.replace('-','')))
-              print('VENTA_DOCUMENT_FIELDS',all(bool(v.get(k)) for k in ('ingcmpnro','ingcomprobante','ingtimbrado','ingfec')))
-            except Exception as e:
-              print('VENTA_ERROR',type(e).__name__,str(e)[:80])
+              print('ERROR',type(e).__name__,str(e)[:200])
           '@ | Set-Content $env:RUNNER_TEMP\probe.py -Encoding utf8
           python $env:RUNNER_TEMP\probe.py
