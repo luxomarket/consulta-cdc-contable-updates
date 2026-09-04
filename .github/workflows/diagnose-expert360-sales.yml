@@ -1,4 +1,4 @@
-name: Diagnose Expert360 public endpoints
+name: Diagnose linked document from official QR
 
 on:
   push:
@@ -16,38 +16,33 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Scan public JS for API endpoint names
+      - name: Fetch Expert QR and inspect official response for association data
         shell: pwsh
         run: |
           @'
-          import re, urllib.parse, urllib.request
-          bases=['https://expert360.com.py/','https://api.expert360.com.py/']
-          H={'User-Agent':'Mozilla/5.0','Accept':'text/html,application/javascript,*/*'}
-          seen=set()
-          for base in bases:
-            try:
-              req=urllib.request.Request(base,headers=H)
-              with urllib.request.urlopen(req,timeout=25) as r:
-                text=r.read().decode('utf-8','replace')
-                final=r.geturl()
-              print('BASE',base,'FINAL',final,'LEN',len(text))
-              scripts=re.findall(r'<script[^>]+src=["\']([^"\']+)',text,re.I)
-              for src in scripts[:50]:
-                u=urllib.parse.urljoin(final,src)
-                if u in seen: continue
-                seen.add(u)
-                try:
-                  req=urllib.request.Request(u,headers=H)
-                  with urllib.request.urlopen(req,timeout=25) as rr:
-                    js=rr.read().decode('utf-8','replace')
-                  hits=sorted(set(re.findall(r'["\']([^"\']*/api/[^"\']+)["\']',js)))
-                  filt=[h for h in hits if any(x in h.lower() for x in ('compra','venta','xml','cdc','document','dte','factura','nota'))]
-                  if filt:
-                    print('SCRIPT',u)
-                    for h in filt[:80]: print(' API',h[:220])
-                except Exception as e:
-                  pass
-            except Exception as e:
-              print('BASE_ERROR',base,type(e).__name__,str(e)[:120])
-          '@ | Set-Content $env:RUNNER_TEMP\scan.py -Encoding utf8
-          python $env:RUNNER_TEMP\scan.py
+          import json, re, urllib.parse, urllib.request
+          CDC='05801146216001001000193122026083111093297972'
+          H={'Accept':'application/json,text/html,*/*','Referer':'https://expert360.com.py/','User-Agent':'Mozilla/5.0'}
+          api='https://api.expert360.com.py/api/compra?'+urllib.parse.urlencode({'cdc':CDC,'agrupar':'false'})
+          req=urllib.request.Request(api,headers=H)
+          with urllib.request.urlopen(req,timeout=25) as r:
+            data=json.loads(r.read().decode('utf-8','replace'))
+          qr=str(data.get('dcarQR') or data.get('dCarQR') or '').replace('&amp;','&')
+          print('QR_PRESENT',bool(qr),'QR_HOST',urllib.parse.urlparse(qr).netloc,'QR_PATH',urllib.parse.urlparse(qr).path)
+          if not qr: raise SystemExit(2)
+          req=urllib.request.Request(qr,headers={'User-Agent':'Mozilla/5.0','Accept':'text/html,application/json,*/*'})
+          with urllib.request.urlopen(req,timeout=30) as r:
+            body=r.read().decode('utf-8','replace'); ct=r.headers.get('content-type'); final=r.geturl()
+          print('OFFICIAL_STATUS',r.status,'CT',ct,'LEN',len(body),'FINAL_HOST',urllib.parse.urlparse(final).netloc)
+          low=body.lower()
+          for token in ('documento asociado','factura relacionada','dcdcde','dcdcdeRef'.lower(),'gcamdeasoc','documento relacionado','referenciado'):
+            print('HAS',token,token in low)
+          text=re.sub(r'<script.*?</script>',' ',body,flags=re.I|re.S)
+          text=re.sub(r'<style.*?</style>',' ',text,flags=re.I|re.S)
+          text=re.sub(r'<[^>]+>',' ',text)
+          text=re.sub(r'\s+',' ',text)
+          for term in ('asociado','relacionado','referenciado','factura'):
+            m=re.search(r'.{0,120}'+term+r'.{0,220}',text,re.I)
+            if m: print('TEXT_MATCH',term,m.group(0)[:360])
+          '@ | Set-Content $env:RUNNER_TEMP\probe.py -Encoding utf8
+          python $env:RUNNER_TEMP\probe.py
