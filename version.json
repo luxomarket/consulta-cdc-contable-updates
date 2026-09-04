@@ -1,9 +1,9 @@
 {
   "app": "Consulta CDC Contable",
-  "version": "1.5.7",
-  "url": "https://github.com/luxomarket/consulta-cdc-contable-updates/releases/download/v1.5.7/Consulta_CDC_Contable_v1.5.7_UPDATE.zip",
-  "sha256": "781047073fac07f4c30e154d7db3322349450b24aa48735cebfde8f2c0cd02ad",
-  "published_at": "2026-08-27T17:06:01.387243+00:00",
+  "version": "1.6.3",
+  "url": "https://github.com/luxomarket/consulta-cdc-contable-updates/releases/download/v1.6.3/Consulta_CDC_Contable_v1.6.3_UPDATE.zip",
+  "sha256": "9ccb5165806a32aeaef69fc1ee2e0195942685f97533525268d521207e560d02",
+  "published_at": "2026-09-04T17:50:26.417413+00:00",
   "channel": "stable",
   "format": 1
 }
